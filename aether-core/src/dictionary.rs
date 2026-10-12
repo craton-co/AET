@@ -130,7 +130,8 @@ impl Dictionary {
                 else {
                     continue;
                 };
-                let stream = bwt_preprocess::rle_encode(&mtf_data).unwrap_or(mtf_data);
+                let stream = bwt_preprocess::rle_encode(&mtf_data)
+                    .unwrap_or_else(|| bwt_preprocess::rle_encode_escaped(&mtf_data));
                 for &byte in &stream {
                     predictor.predict();
                     predictor.update(byte);

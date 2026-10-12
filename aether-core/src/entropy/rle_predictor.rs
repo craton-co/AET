@@ -29,6 +29,38 @@ const ALPHA_BIN: f32 = 0.5;
 pub(crate) const ALPHA_LIT: f32 = 0.1;
 /// Total virtual mass for literal model.
 const ALPHA_LIT_TOTAL: f32 = 254.0 * ALPHA_LIT;
+const NUM_LITS: usize = 254;
+
+#[inline]
+pub(crate) fn fenwick254_add(tree: &mut [u32; NUM_LITS], i: usize, delta: u32) {
+    let mut idx = i + 1;
+    while idx <= NUM_LITS {
+        tree[idx - 1] += delta;
+        idx += idx & idx.wrapping_neg();
+    }
+}
+
+#[inline]
+pub(crate) fn fenwick254_prefix(tree: &[u32; NUM_LITS], len: usize) -> u32 {
+    let mut sum = 0u32;
+    let mut idx = len;
+    while idx > 0 {
+        sum += tree[idx - 1];
+        idx &= idx - 1;
+    }
+    sum
+}
+
+#[inline]
+pub(crate) fn fenwick254_rebuild(tree: &mut [u32; NUM_LITS], counts: &[u32; NUM_LITS]) {
+    *tree = *counts;
+    for idx in 1..=NUM_LITS {
+        let parent = idx + (idx & idx.wrapping_neg());
+        if parent <= NUM_LITS {
+            tree[parent - 1] += tree[idx - 1];
+        }
+    }
+}
 
 /// Simple binary counter with virtual pseudocounts.
 #[derive(Clone)]
@@ -76,14 +108,17 @@ impl BinaryModel {
 /// - Binary model: p(RUNA | run, context)
 /// - Multi-way model: p(value | literal, context) for values 2-255
 ///
-/// Memory: ~3 KiB.
+/// Memory: ~6 KiB.
+#[derive(Clone)]
 pub struct RlePredictor {
     /// p(is_run_symbol | context) — is the next byte 0 or 1?
     run_vs_lit: [BinaryModel; NUM_CONTEXTS],
     /// p(RUNA | is_run, context) — given it's a run symbol, is it RUNA(0)?
     runa_vs_runb: [BinaryModel; NUM_CONTEXTS],
     /// p(value | is_literal, context) — literal value counts (indexed 0-253 for values 2-255).
-    lit_counts: [[u32; 254]; NUM_CONTEXTS],
+    lit_counts: [[u32; NUM_LITS]; NUM_CONTEXTS],
+    /// 1-indexed Fenwick tree over `lit_counts` for O(log 254) prefix queries.
+    lit_fenwick: [[u32; NUM_LITS]; NUM_CONTEXTS],
     lit_totals: [u32; NUM_CONTEXTS],
     /// Current context class.
     ctx: usize,
@@ -94,7 +129,8 @@ impl RlePredictor {
         Self {
             run_vs_lit: [BinaryModel::new(), BinaryModel::new(), BinaryModel::new()],
             runa_vs_runb: [BinaryModel::new(), BinaryModel::new(), BinaryModel::new()],
-            lit_counts: [[0u32; 254]; NUM_CONTEXTS],
+            lit_counts: [[0u32; NUM_LITS]; NUM_CONTEXTS],
+            lit_fenwick: [[0u32; NUM_LITS]; NUM_CONTEXTS],
             lit_totals: [0u32; NUM_CONTEXTS],
             ctx: CTX_START,
         }
@@ -126,13 +162,31 @@ impl RlePredictor {
     /// copying it out on every predicted byte was pure memory traffic — over
     /// a kilobyte per byte of output on the decode hot path.
     #[inline]
-    pub fn model_parts(&self) -> (f32, f32, f32, &[u32; 254]) {
+    pub fn model_parts(&self) -> (f32, f32, f32, &[u32; NUM_LITS]) {
         let c = self.ctx;
         let p_run = self.run_vs_lit[c].p_yes();
         let p_runa_given_run = self.runa_vs_runb[c].p_yes();
         let lit_denom = self.lit_totals[c] as f32 + ALPHA_LIT_TOTAL;
         let literal_scale = (1.0 - p_run) / lit_denom;
         (p_run, p_runa_given_run, literal_scale, &self.lit_counts[c])
+    }
+
+    /// Decomposed prediction including the current context's total literal
+    /// count and Fenwick tree for O(1) normalizer + O(log 254) CDF queries.
+    #[inline]
+    pub(crate) fn model_parts_fenwick(
+        &self,
+    ) -> (f32, f32, u32, &[u32; NUM_LITS], &[u32; NUM_LITS]) {
+        let c = self.ctx;
+        let p_run = self.run_vs_lit[c].p_yes();
+        let p_runa_given_run = self.runa_vs_runb[c].p_yes();
+        (
+            p_run,
+            p_runa_given_run,
+            self.lit_totals[c],
+            &self.lit_counts[c],
+            &self.lit_fenwick[c],
+        )
     }
 }
 
@@ -157,7 +211,7 @@ impl ProbabilityPredictor for RlePredictor {
 
         // Step 3: distribute the literal mass among values 2-255. `scale`
         // folds `p_lit / denom` so this is 254 multiplies, not 254 divides.
-        for i in 0..254 {
+        for i in 0..NUM_LITS {
             probs[i + 2] = (lit_entry[i] as f32 + ALPHA_LIT) * scale;
         }
 
@@ -185,11 +239,137 @@ impl ProbabilityPredictor for RlePredictor {
                     *v >>= 1;
                     self.lit_totals[c] += *v;
                 }
+                fenwick254_rebuild(&mut self.lit_fenwick[c], &self.lit_counts[c]);
+            } else {
+                fenwick254_add(&mut self.lit_fenwick[c], idx, 1);
             }
         }
 
         // Advance context
         self.ctx = Self::context_of(byte);
+    }
+
+    #[inline]
+    fn predict_cdf(&mut self) -> [u16; 257] {
+        use crate::coding::rans::PROB_TOTAL;
+        const RESERVED: u32 = 256;
+        let scalable = (PROB_TOTAL - RESERVED) as f64;
+
+        let (p_run, p_runa, lit_total, lit_counts, _) = self.model_parts_fenwick();
+        let w0 = (p_run * p_runa).max(1e-6) as f64;
+        let w1 = (p_run * (1.0 - p_runa)).max(1e-6) as f64;
+        let w01 = w0 + w1;
+        let p_lit = (1.0 - p_run).max(1e-6) as f64;
+        let lit_coef = p_lit / (lit_total as f64 + ALPHA_LIT_TOTAL as f64);
+        let base_lit = lit_coef * (ALPHA_LIT as f64);
+        let total = w01 + lit_coef * (lit_total as f64) + (NUM_LITS as f64) * base_lit;
+
+        let mut cdf = [0u16; 257];
+        cdf[0] = 0;
+        cdf[1] = (1 + (w0 * scalable / total).floor() as u32).min(PROB_TOTAL) as u16;
+        let mut rle_cum = 0u32;
+        for m in 0..NUM_LITS {
+            let cum = w01 + lit_coef * (rle_cum as f64) + (m as f64) * base_lit;
+            let sym = 2 + m;
+            cdf[sym] =
+                (sym as u32 + (cum * scalable / total).floor() as u32).min(PROB_TOTAL) as u16;
+            rle_cum += lit_counts[m];
+        }
+        cdf[256] = PROB_TOTAL as u16;
+        cdf
+    }
+
+    #[inline]
+    fn query_cdf(&mut self, byte: u8) -> (u16, u16) {
+        use crate::coding::rans::PROB_TOTAL;
+        const RESERVED: u32 = 256;
+        let scalable = (PROB_TOTAL - RESERVED) as f64;
+
+        let (p_run, p_runa, lit_total, lit_counts, lit_fenwick) = self.model_parts_fenwick();
+        let w0 = (p_run * p_runa).max(1e-6) as f64;
+        let w1 = (p_run * (1.0 - p_runa)).max(1e-6) as f64;
+        let w01 = w0 + w1;
+        let p_lit = (1.0 - p_run).max(1e-6) as f64;
+        let lit_coef = p_lit / (lit_total as f64 + ALPHA_LIT_TOTAL as f64);
+        let base_lit = lit_coef * (ALPHA_LIT as f64);
+        let total = w01 + lit_coef * (lit_total as f64) + (NUM_LITS as f64) * base_lit;
+
+        let q = |cum: f64, sym: usize| -> u16 {
+            (sym as u32 + (cum * scalable / total).floor() as u32).min(PROB_TOTAL) as u16
+        };
+
+        match byte {
+            0 => (0, q(w0, 1)),
+            1 => (q(w0, 1), q(w01, 2)),
+            _ => {
+                let m = (byte - 2) as usize;
+                let rle_cum = fenwick254_prefix(lit_fenwick, m);
+                let lo = q(w01 + lit_coef * (rle_cum as f64) + (m as f64) * base_lit, 2 + m);
+                let hi = if byte == 255 {
+                    PROB_TOTAL as u16
+                } else {
+                    let next_cum = rle_cum + lit_counts[m];
+                    let m1 = m + 1;
+                    q(
+                        w01 + lit_coef * (next_cum as f64) + (m1 as f64) * base_lit,
+                        2 + m1,
+                    )
+                };
+                (lo, hi)
+            }
+        }
+    }
+
+    #[inline]
+    fn decode_symbol(&mut self, freq: u32) -> (u8, u16, u16) {
+        use crate::coding::rans::PROB_TOTAL;
+        const RESERVED: u32 = 256;
+        let scalable = (PROB_TOTAL - RESERVED) as f64;
+
+        let (p_run, p_runa, lit_total, _, lit_fenwick) = self.model_parts_fenwick();
+        let w0 = (p_run * p_runa).max(1e-6) as f64;
+        let w1 = (p_run * (1.0 - p_runa)).max(1e-6) as f64;
+        let w01 = w0 + w1;
+        let p_lit = (1.0 - p_run).max(1e-6) as f64;
+        let lit_coef = p_lit / (lit_total as f64 + ALPHA_LIT_TOTAL as f64);
+        let base_lit = lit_coef * (ALPHA_LIT as f64);
+        let total = w01 + lit_coef * (lit_total as f64) + (NUM_LITS as f64) * base_lit;
+
+        let q = |cum: f64, sym: usize| -> u32 {
+            (sym as u32 + (cum * scalable / total).floor() as u32).min(PROB_TOTAL)
+        };
+
+        let b1 = q(w0, 1);
+        if freq < b1 {
+            return (0, 0, b1 as u16);
+        }
+        let b2 = q(w01, 2);
+        if freq < b2 {
+            return (1, b1 as u16, b2 as u16);
+        }
+
+        let mut lo_m = 0usize;
+        let mut rle_cum = 0u32;
+        let mut lo_value = b2;
+        let mut hi_value = PROB_TOTAL;
+
+        for step in [128usize, 64, 32, 16, 8, 4, 2, 1] {
+            let cand_m = lo_m + step;
+            if cand_m < NUM_LITS {
+                let cand_rle = rle_cum + lit_fenwick[cand_m - 1];
+                let cum = w01 + lit_coef * (cand_rle as f64) + (cand_m as f64) * base_lit;
+                let mid_value = q(cum, 2 + cand_m);
+                if mid_value <= freq {
+                    lo_m = cand_m;
+                    rle_cum = cand_rle;
+                    lo_value = mid_value;
+                } else {
+                    hi_value = mid_value;
+                }
+            }
+        }
+
+        ((2 + lo_m) as u8, lo_value as u16, hi_value as u16)
     }
 
     fn reset(&mut self) {
@@ -292,6 +472,9 @@ impl ProbabilityPredictor for RlePredictor {
         self.run_vs_lit = run_vs_lit;
         self.runa_vs_runb = runa_vs_runb;
         self.lit_counts = lit_counts;
+        for i in 0..NUM_CONTEXTS {
+            fenwick254_rebuild(&mut self.lit_fenwick[i], &self.lit_counts[i]);
+        }
         self.lit_totals = lit_totals;
         self.ctx = if ctx >= NUM_CONTEXTS { 0 } else { ctx };
         true

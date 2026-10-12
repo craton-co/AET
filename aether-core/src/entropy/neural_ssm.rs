@@ -21,7 +21,9 @@
 //! Only 2*(D+1) = 66 learnable parameters (at D=32) → adapts rapidly from scratch.
 //! Memory: ~25 KiB total (embedding table + SSM state + RlePredictor).
 
-use super::rle_predictor::{RlePredictor, ALPHA_LIT};
+use super::rle_predictor::{
+    fenwick254_add, fenwick254_prefix, fenwick254_rebuild, RlePredictor, ALPHA_LIT,
+};
 use super::traits::ProbabilityPredictor;
 use crate::format::PredictorId;
 
@@ -176,6 +178,49 @@ fn fast_ln(x: f32) -> f32 {
     (exponent + ln_m) * core::f32::consts::LN_2
 }
 
+/// Pre-parsed baseline state for zero-allocation `reset()` when a dictionary is attached.
+#[derive(Clone)]
+struct ParsedSsmBaseline {
+    rle: RlePredictor,
+    h: [f32; D_MAX],
+    w_run: [f32; D_MAX],
+    b_run: f32,
+    w_runa: [f32; D_MAX],
+    b_runa: f32,
+    ssm_perf: f32,
+    rle_perf: f32,
+    o2_lit_counts: Box<[[u32; 254]; NUM_O2_CTX]>,
+    o2_lit_fenwick: Box<[[u32; 254]; NUM_O2_CTX]>,
+    o2_lit_totals: [u32; NUM_O2_CTX],
+    prev_byte: u8,
+    prev_prev_byte: u8,
+    step: u32,
+    raw_bytes: Vec<u8>,
+}
+
+/// Per-step O(1) mixing and normalization parameters shared across
+/// `predict_cdf`, `query_cdf`, and `decode_symbol`.
+#[derive(Clone, Copy)]
+struct StepParams {
+    w0: f64,
+    w01: f64,
+    total: f64,
+    rle_coef: f64,
+    o2_coef: f64,
+    base_lit: f64,
+    o2_ctx: usize,
+}
+
+impl StepParams {
+    #[inline(always)]
+    fn lit_cumulative(&self, m: usize, rle_cum: u32, o2_cum: u32) -> f64 {
+        self.w01
+            + self.rle_coef * (rle_cum as f64)
+            + self.o2_coef * (o2_cum as f64)
+            + (m as f64) * self.base_lit
+    }
+}
+
 /// Neural SSM predictor with adaptive mixing.
 pub struct NeuralSsmPredictor {
     // ── Config ────────────────────────────────────────────────
@@ -213,6 +258,8 @@ pub struct NeuralSsmPredictor {
     // ── Order-2 literal context model ─────────────────────────
     /// Literal counts per order-2 context [NUM_O2_CTX][254].
     o2_lit_counts: Box<[[u32; 254]; NUM_O2_CTX]>,
+    /// 1-indexed Fenwick tree per order-2 context [NUM_O2_CTX][254] for O(log 254) prefix sums.
+    o2_lit_fenwick: Box<[[u32; 254]; NUM_O2_CTX]>,
     /// Total literal counts per context.
     o2_lit_totals: [u32; NUM_O2_CTX],
     /// Previous two bytes for context hashing.
@@ -230,13 +277,14 @@ pub struct NeuralSsmPredictor {
 
     step: u32,
 
-    /// Stage A: optional per-block reset baseline (a serialized predictor
+    /// Stage A: optional per-block reset baseline (a pre-parsed predictor
     /// state from a pretrained dictionary). When set, `reset()` restores
-    /// THIS state instead of zeroing — so every block starts from the
-    /// dictionary's learned distribution while remaining independently
-    /// decodable (seekability preserved). NOT part of `save_state`; it is a
-    /// coding-time seed supplied identically at encode and decode.
-    dict_baseline: Option<Vec<u8>>,
+    /// THIS state in-place without re-parsing or allocating — so every block
+    /// starts from the dictionary's learned distribution while remaining
+    /// independently decodable (seekability preserved). NOT part of
+    /// `save_state`; it is a coding-time seed supplied identically at encode
+    /// and decode.
+    dict_baseline: Option<Box<ParsedSsmBaseline>>,
 }
 
 impl NeuralSsmPredictor {
@@ -331,6 +379,7 @@ impl NeuralSsmPredictor {
             ssm_perf: 0.0,
             rle_perf: 0.0,
             o2_lit_counts: Box::new([[0u32; 254]; NUM_O2_CTX]),
+            o2_lit_fenwick: Box::new([[0u32; 254]; NUM_O2_CTX]),
             o2_lit_totals: [0u32; NUM_O2_CTX],
             prev_byte: 0xFF, // sentinel: no previous byte
             prev_prev_byte: 0xFF,
@@ -352,18 +401,42 @@ impl NeuralSsmPredictor {
         if !self.load_state(state) {
             return false;
         }
-        self.dict_baseline = Some(state.to_vec());
+        self.dict_baseline = Some(Box::new(ParsedSsmBaseline {
+            rle: self.rle.clone(),
+            h: self.h,
+            w_run: self.w_run,
+            b_run: self.b_run,
+            w_runa: self.w_runa,
+            b_runa: self.b_runa,
+            ssm_perf: self.ssm_perf,
+            rle_perf: self.rle_perf,
+            o2_lit_counts: self.o2_lit_counts.clone(),
+            o2_lit_fenwick: self.o2_lit_fenwick.clone(),
+            o2_lit_totals: self.o2_lit_totals,
+            prev_byte: self.prev_byte,
+            prev_prev_byte: self.prev_prev_byte,
+            step: self.step,
+            raw_bytes: state.to_vec(),
+        }));
         true
     }
 
     /// Compute SSM's binary predictions from hidden state.
+    #[inline]
     fn ssm_binary_predict(&self) -> (f32, f32) {
         let d = self.cfg.d;
         let mut dot_run = self.b_run;
         let mut dot_runa = self.b_runa;
-        for i in 0..d {
-            dot_run += self.w_run[i] * self.h[i];
-            dot_runa += self.w_runa[i] * self.h[i];
+        if d == D_MAX {
+            for i in 0..D_MAX {
+                dot_run += self.w_run[i] * self.h[i];
+                dot_runa += self.w_runa[i] * self.h[i];
+            }
+        } else {
+            for i in 0..d {
+                dot_run += self.w_run[i] * self.h[i];
+                dot_runa += self.w_runa[i] * self.h[i];
+            }
         }
         (sigmoid(dot_run), sigmoid(dot_runa))
     }
@@ -406,15 +479,14 @@ impl NeuralSsmPredictor {
         (diff * self.cfg.mix_sensitivity).min(self.cfg.max_alpha)
     }
 
-    /// Build the clamped, unnormalized symbol weights shared by the encoder
-    /// interval query and decoder CDF paths.
+    /// Compute O(1) per-step binary predictions and linear literal combination
+    /// coefficients. Because `quantized_boundary` reserves 1 count per symbol
+    /// (`RESERVED = 256`) and `p_lit >= MIN_PROB`, literal weights are strictly
+    /// positive linear functions of `rle_lit_counts` and `o2_lit_counts`, so the
+    /// total normalizer `total` is known analytically in O(1) without a 256-loop!
     #[inline]
-    fn model_weights(&mut self) -> ([f32; 256], f32) {
-        // Decomposed rather than `self.rle.predict()`: the array form would
-        // build and copy 1 KiB per predicted byte, all of which is folded
-        // into `weights` below. The arithmetic is unchanged — see
-        // `RlePredictor::model_parts`.
-        let (rle_run, rle_runa_given_run, rle_lit_scale, rle_lit_counts) = self.rle.model_parts();
+    fn prepare_step_params(&mut self) -> StepParams {
+        let (rle_run, rle_runa_given_run, rle_lit_total, _, _) = self.rle.model_parts_fenwick();
         let rle_p0 = rle_run * rle_runa_given_run;
         let rle_p1 = rle_run * (1.0 - rle_runa_given_run);
 
@@ -435,51 +507,36 @@ impl NeuralSsmPredictor {
         let p_run = alpha * ssm_p_run + (1.0 - alpha) * rle_p_run;
         let p_runa = alpha * ssm_p_runa + (1.0 - alpha) * rle_p_runa;
 
-        let inv_rle_lit = 1.0 / (1.0 - rle_p_run).max(MIN_PROB);
         let o2_ctx = Self::o2_context(self.prev_byte, self.prev_prev_byte);
         let o2_obs = self.o2_lit_totals[o2_ctx];
-        let inv_o2_total = 1.0 / (o2_obs as f32 + 254.0 * O2_ALPHA);
         let eff_blend = self.cfg.o2_lit_blend * (o2_obs as f32 / (o2_obs as f32 + O2_CONF_K));
         let rle_weight = 1.0 - eff_blend;
-        let use_o2 = eff_blend > 0.0;
 
-        let mut weights = [0.0f32; 256];
-        weights[0] = (p_run * p_runa).max(MIN_PROB);
-        weights[1] = (p_run * (1.0 - p_runa)).max(MIN_PROB);
-        let p_lit = 1.0 - p_run;
-        let mut sum = weights[0] + weights[1];
+        let w0 = (p_run * p_runa).max(MIN_PROB) as f64;
+        let w1 = (p_run * (1.0 - p_runa)).max(MIN_PROB) as f64;
+        let w01 = w0 + w1;
+        let p_lit = (1.0 - p_run).max(MIN_PROB) as f64;
 
-        for i in 2..256 {
-            // `(count + ALPHA_LIT) * rle_lit_scale` is exactly what
-            // `RlePredictor::predict()[i]` would have been.
-            let rle_prob = (rle_lit_counts[i - 2] as f32 + ALPHA_LIT) * rle_lit_scale;
-            let rle_p = rle_prob * inv_rle_lit;
-            let lit_p = if use_o2 {
-                let o2_p = (self.o2_lit_counts[o2_ctx][i - 2] as f32 + O2_ALPHA) * inv_o2_total;
-                rle_weight * rle_p + eff_blend * o2_p
-            } else {
-                rle_p
-            };
-            let weight = (p_lit * lit_p).max(MIN_PROB);
-            weights[i] = weight;
-            sum += weight;
+        let rle_denom = rle_lit_total as f64 + 254.0 * (ALPHA_LIT as f64);
+        let rle_coef = p_lit * (rle_weight as f64) / rle_denom;
+        let o2_coef = if eff_blend > 0.0 {
+            let o2_denom = o2_obs as f64 + 254.0 * (O2_ALPHA as f64);
+            p_lit * (eff_blend as f64) / o2_denom
+        } else {
+            0.0
+        };
+        let base_lit = rle_coef * (ALPHA_LIT as f64) + o2_coef * (O2_ALPHA as f64);
+        let total = w01 + rle_coef * (rle_lit_total as f64) + o2_coef * (o2_obs as f64) + 254.0 * base_lit;
+
+        StepParams {
+            w0,
+            w01,
+            total,
+            rle_coef,
+            o2_coef,
+            base_lit,
+            o2_ctx,
         }
-
-        (weights, sum)
-    }
-
-    /// Prefix sums of `weights` in the exact accumulation order
-    /// `predict_cdf` uses, so `quantized_boundary(prefix[i], total, i)`
-    /// reproduces `predict_cdf()[i]` bit-for-bit.
-    #[inline]
-    fn weight_prefix(weights: &[f32; 256]) -> [f64; 256] {
-        let mut prefix = [0.0f64; 256];
-        let mut cumulative = 0.0f64;
-        for i in 0..256 {
-            prefix[i] = cumulative;
-            cumulative += weights[i] as f64;
-        }
-        prefix
     }
 
     /// Quantize cumulative mass while reserving one count per symbol.
@@ -502,107 +559,138 @@ impl Default for NeuralSsmPredictor {
 impl ProbabilityPredictor for NeuralSsmPredictor {
     #[inline]
     fn predict(&mut self) -> [f32; 256] {
-        let (mut probs, sum) = self.model_weights();
-        let inv = 1.0 / sum;
-        for prob in probs.iter_mut() {
-            *prob *= inv;
-        }
+        let params = self.prepare_step_params();
+        let (_, _, _, rle_lit_counts, _) = self.rle.model_parts_fenwick();
+        let o2_counts = &self.o2_lit_counts[params.o2_ctx];
+        let inv_total = (1.0 / params.total) as f32;
 
+        let mut probs = [0.0f32; 256];
+        probs[0] = (params.w0 as f32) * inv_total;
+        probs[1] = ((params.w01 - params.w0) as f32) * inv_total;
+        for m in 0..254 {
+            let w = params.rle_coef * (rle_lit_counts[m] as f64)
+                + params.o2_coef * (o2_counts[m] as f64)
+                + params.base_lit;
+            probs[2 + m] = (w as f32) * inv_total;
+        }
         probs
     }
 
     /// Build 15-bit CDF directly, bypassing the `[f32; 256]` → probs_to_cdf() path.
-    ///
-    /// Uses the same cumulative-rounding approach as probs_to_cdf but avoids
-    /// the expensive fixup path (sort + redistribution) since we build the
-    /// probabilities ourselves and can guarantee they're well-behaved.
     #[inline]
     fn predict_cdf(&mut self) -> [u16; 257] {
         use crate::coding::rans::PROB_TOTAL;
 
-        let (weights, sum) = self.model_weights();
+        let params = self.prepare_step_params();
+        let (_, _, _, rle_lit_counts, _) = self.rle.model_parts_fenwick();
+        let o2_counts = &self.o2_lit_counts[params.o2_ctx];
+
         let mut monotone_cdf = [0u16; 257];
-        let mut cumulative = 0.0f64;
-        let total = sum as f64;
-        for i in 0..256 {
-            monotone_cdf[i] = Self::quantized_boundary(cumulative, total, i);
-            cumulative += weights[i] as f64;
+        monotone_cdf[0] = 0;
+        monotone_cdf[1] = Self::quantized_boundary(params.w0, params.total, 1);
+
+        let mut rle_cum = 0u32;
+        let mut o2_cum = 0u32;
+        for m in 0..254 {
+            let cum = params.lit_cumulative(m, rle_cum, o2_cum);
+            monotone_cdf[2 + m] = Self::quantized_boundary(cum, params.total, 2 + m);
+            rle_cum += rle_lit_counts[m];
+            o2_cum += o2_counts[m];
         }
         monotone_cdf[256] = PROB_TOTAL as u16;
         monotone_cdf
     }
 
-    /// Encode-only fast path that computes just the selected symbol interval.
+    /// Encode-only fast path: O(1) for RUNA/RUNB (symbols 0 and 1, ~75% of
+    /// BWT+MTF+RLE stream) and O(log 254) via Fenwick prefix sums for literals.
     #[inline]
     fn query_cdf(&mut self, byte: u8) -> (u16, u16) {
-        let (weights, sum) = self.model_weights();
-        let symbol = byte as usize;
-        let mut cumulative = 0.0f64;
-        for &weight in &weights[..symbol] {
-            cumulative += weight as f64;
+        use crate::coding::rans::PROB_TOTAL;
+
+        let params = self.prepare_step_params();
+        match byte {
+            0 => (0, Self::quantized_boundary(params.w0, params.total, 1)),
+            1 => (
+                Self::quantized_boundary(params.w0, params.total, 1),
+                Self::quantized_boundary(params.w01, params.total, 2),
+            ),
+            _ => {
+                let m = (byte - 2) as usize;
+                let (_, _, _, rle_lit_counts, rle_fenwick) = self.rle.model_parts_fenwick();
+                let o2_counts = &self.o2_lit_counts[params.o2_ctx];
+                let o2_fenwick = &self.o2_lit_fenwick[params.o2_ctx];
+
+                let rle_cum = fenwick254_prefix(rle_fenwick, m);
+                let o2_cum = fenwick254_prefix(o2_fenwick, m);
+                let lo = Self::quantized_boundary(
+                    params.lit_cumulative(m, rle_cum, o2_cum),
+                    params.total,
+                    2 + m,
+                );
+                let hi = if byte == 255 {
+                    PROB_TOTAL as u16
+                } else {
+                    let next_rle = rle_cum + rle_lit_counts[m];
+                    let next_o2 = o2_cum + o2_counts[m];
+                    Self::quantized_boundary(
+                        params.lit_cumulative(m + 1, next_rle, next_o2),
+                        params.total,
+                        3 + m,
+                    )
+                };
+                (lo, hi)
+            }
         }
-        let lo = Self::quantized_boundary(cumulative, sum as f64, symbol);
-        cumulative += weights[symbol] as f64;
-        let hi = if symbol == 255 {
-            crate::coding::rans::PROB_TOTAL as u16
-        } else {
-            Self::quantized_boundary(cumulative, sum as f64, symbol + 1)
-        };
-        (lo, hi)
     }
 
-    /// Decode-only fast path: locate the symbol whose interval contains
-    /// `freq` without materialising the CDF.
-    ///
-    /// `predict_cdf` spends one `quantized_boundary` call — a `f64` multiply,
-    /// divide and floor — on each of the 256 boundaries, then the range
-    /// decoder binary-searches the table and reads exactly two of them. The
-    /// boundaries are non-decreasing in the symbol index, so the search can
-    /// run directly over them and evaluate only the ~9 it visits.
-    ///
-    /// Bit-identity with `predict_cdf` is what keeps the decoder in lockstep
-    /// with the encoder, and rests on `weight_prefix` accumulating in the same
-    /// order `predict_cdf` does; `decode_symbol_matches_predict_cdf` checks it
-    /// over the whole frequency space.
+    /// Decode-only fast path: O(1) for RUNA/RUNB (0 and 1) and 8-step Fenwick
+    /// binary lifting in O(log 254) for literals (2..=255), without computing
+    /// or materialising a 256-entry weight or CDF table.
     #[inline]
     fn decode_symbol(&mut self, freq: u32) -> (u8, u16, u16) {
         use crate::coding::rans::PROB_TOTAL;
-
-        let (weights, sum) = self.model_weights();
-        let total = sum as f64;
-        let prefix = Self::weight_prefix(&weights);
-
-        let boundary = |i: usize| -> u32 {
-            if i == 256 {
-                PROB_TOTAL
-            } else {
-                Self::quantized_boundary(prefix[i], total, i) as u32
-            }
-        };
-
-        // Invariant: boundary(lo) <= freq < boundary(hi), with the bounding
-        // values carried along so the interval falls out of the search
-        // instead of costing two more quantisations at the end.
-        // Seeded by boundary(0) == 0 and boundary(256) == PROB_TOTAL, and the
-        // caller clamps freq to PROB_TOTAL - 1.
         debug_assert!(freq < PROB_TOTAL);
-        let mut lo = 0usize;
-        let mut lo_value = 0u32;
-        let mut hi = 256usize;
+
+        let params = self.prepare_step_params();
+
+        // Fast path for RUNA (0) and RUNB (1), which account for ~75% of BWT+MTF+RLE symbols.
+        let b1 = Self::quantized_boundary(params.w0, params.total, 1) as u32;
+        if freq < b1 {
+            return (0, 0, b1 as u16);
+        }
+        let b2 = Self::quantized_boundary(params.w01, params.total, 2) as u32;
+        if freq < b2 {
+            return (1, b1 as u16, b2 as u16);
+        }
+
+        let (_, _, _, _, rle_fenwick) = self.rle.model_parts_fenwick();
+        let o2_fenwick = &self.o2_lit_fenwick[params.o2_ctx];
+
+        let mut lo_m = 0usize;
+        let mut rle_cum = 0u32;
+        let mut o2_cum = 0u32;
+        let mut lo_value = b2;
         let mut hi_value = PROB_TOTAL;
-        while hi - lo > 1 {
-            let mid = (lo + hi) >> 1;
-            let mid_value = boundary(mid);
-            if mid_value <= freq {
-                lo = mid;
-                lo_value = mid_value;
-            } else {
-                hi = mid;
-                hi_value = mid_value;
+
+        for step in [128usize, 64, 32, 16, 8, 4, 2, 1] {
+            let cand_m = lo_m + step;
+            if cand_m < 254 {
+                let cand_rle = rle_cum + rle_fenwick[cand_m - 1];
+                let cand_o2 = o2_cum + o2_fenwick[cand_m - 1];
+                let cum = params.lit_cumulative(cand_m, cand_rle, cand_o2);
+                let mid_value = Self::quantized_boundary(cum, params.total, 2 + cand_m) as u32;
+                if mid_value <= freq {
+                    lo_m = cand_m;
+                    rle_cum = cand_rle;
+                    o2_cum = cand_o2;
+                    lo_value = mid_value;
+                } else {
+                    hi_value = mid_value;
+                }
             }
         }
 
-        (lo as u8, lo_value as u16, hi_value as u16)
+        ((2 + lo_m) as u8, lo_value as u16, hi_value as u16)
     }
 
     #[inline]
@@ -646,9 +734,16 @@ impl ProbabilityPredictor for NeuralSsmPredictor {
         let y_run = if byte <= 1 { 1.0f32 } else { 0.0 };
         let err_run = self.last_ssm_p_run - y_run; // sigmoid CE gradient
         let lr_err_run = lr * err_run;
-        for i in 0..d {
-            self.w_run[i] =
-                (self.w_run[i] - lr_err_run * self.h[i]).clamp(-WEIGHT_CLIP, WEIGHT_CLIP);
+        if d == D_MAX {
+            for i in 0..D_MAX {
+                self.w_run[i] =
+                    (self.w_run[i] - lr_err_run * self.h[i]).clamp(-WEIGHT_CLIP, WEIGHT_CLIP);
+            }
+        } else {
+            for i in 0..d {
+                self.w_run[i] =
+                    (self.w_run[i] - lr_err_run * self.h[i]).clamp(-WEIGHT_CLIP, WEIGHT_CLIP);
+            }
         }
         self.b_run = (self.b_run - lr_err_run).clamp(-WEIGHT_CLIP, WEIGHT_CLIP);
 
@@ -657,9 +752,16 @@ impl ProbabilityPredictor for NeuralSsmPredictor {
             let y_runa = if byte == 0 { 1.0f32 } else { 0.0 };
             let err_runa = self.last_ssm_p_runa - y_runa;
             let lr_err_runa = lr * err_runa;
-            for i in 0..d {
-                self.w_runa[i] =
-                    (self.w_runa[i] - lr_err_runa * self.h[i]).clamp(-WEIGHT_CLIP, WEIGHT_CLIP);
+            if d == D_MAX {
+                for i in 0..D_MAX {
+                    self.w_runa[i] =
+                        (self.w_runa[i] - lr_err_runa * self.h[i]).clamp(-WEIGHT_CLIP, WEIGHT_CLIP);
+                }
+            } else {
+                for i in 0..d {
+                    self.w_runa[i] =
+                        (self.w_runa[i] - lr_err_runa * self.h[i]).clamp(-WEIGHT_CLIP, WEIGHT_CLIP);
+                }
             }
             self.b_runa = (self.b_runa - lr_err_runa).clamp(-WEIGHT_CLIP, WEIGHT_CLIP);
         }
@@ -676,13 +778,22 @@ impl ProbabilityPredictor for NeuralSsmPredictor {
                     *v >>= 1;
                     self.o2_lit_totals[o2_ctx] += *v;
                 }
+                fenwick254_rebuild(&mut self.o2_lit_fenwick[o2_ctx], &self.o2_lit_counts[o2_ctx]);
+            } else {
+                fenwick254_add(&mut self.o2_lit_fenwick[o2_ctx], idx, 1);
             }
         }
 
         // ── SSM state update: EMA with per-dimension decay ────────────
         let emb = &self.embed[y];
-        for (i, h_val) in self.h.iter_mut().enumerate().take(d) {
-            *h_val = self.a[i] * *h_val + self.a_inv[i] * emb[i];
+        if d == D_MAX {
+            for i in 0..D_MAX {
+                self.h[i] = self.a[i] * self.h[i] + self.a_inv[i] * emb[i];
+            }
+        } else {
+            for (i, h_val) in self.h.iter_mut().enumerate().take(d) {
+                *h_val = self.a[i] * *h_val + self.a_inv[i] * emb[i];
+            }
         }
 
         self.prev_prev_byte = self.prev_byte;
@@ -691,14 +802,24 @@ impl ProbabilityPredictor for NeuralSsmPredictor {
     }
 
     fn reset(&mut self) {
-        // Stage A: if a dictionary baseline is set, restore THAT state so
-        // every block starts from the pretrained distribution. We clone the
-        // bytes first to avoid borrowing self while load_state mutates it;
-        // the baseline was validated in set_dict_baseline, so this succeeds.
-        if let Some(baseline) = self.dict_baseline.clone() {
-            let ok = self.load_state(&baseline);
-            debug_assert!(ok, "dict_baseline was validated on set, must reload");
-            // load_state does not touch dict_baseline, so it persists.
+        // Stage A: if a dictionary baseline is set, restore THAT pre-parsed
+        // state in-place without heap allocation or byte parsing.
+        if let Some(ref baseline) = self.dict_baseline {
+            self.rle = baseline.rle.clone();
+            self.h = baseline.h;
+            self.w_run = baseline.w_run;
+            self.b_run = baseline.b_run;
+            self.w_runa = baseline.w_runa;
+            self.b_runa = baseline.b_runa;
+            self.ssm_perf = baseline.ssm_perf;
+            self.rle_perf = baseline.rle_perf;
+            self.o2_lit_counts.copy_from_slice(&*baseline.o2_lit_counts);
+            self.o2_lit_fenwick
+                .copy_from_slice(&*baseline.o2_lit_fenwick);
+            self.o2_lit_totals = baseline.o2_lit_totals;
+            self.prev_byte = baseline.prev_byte;
+            self.prev_prev_byte = baseline.prev_prev_byte;
+            self.step = baseline.step;
             return;
         }
         // Zero only mutable state in-place. Deterministic fields (cfg, a, a_inv,
@@ -714,6 +835,9 @@ impl ProbabilityPredictor for NeuralSsmPredictor {
         for ctx in self.o2_lit_counts.iter_mut() {
             ctx.fill(0);
         }
+        for ctx in self.o2_lit_fenwick.iter_mut() {
+            ctx.fill(0);
+        }
         self.o2_lit_totals.fill(0);
         self.prev_byte = 0xFF;
         self.prev_prev_byte = 0xFF;
@@ -726,7 +850,7 @@ impl ProbabilityPredictor for NeuralSsmPredictor {
     }
 
     fn coding_baseline(&self) -> Option<&[u8]> {
-        self.dict_baseline.as_deref()
+        self.dict_baseline.as_ref().map(|b| b.raw_bytes.as_slice())
     }
 
     fn set_coding_baseline(&mut self, state: &[u8]) -> bool {
@@ -877,10 +1001,6 @@ impl ProbabilityPredictor for NeuralSsmPredictor {
 
         // Layout MUST match save_state: all counts (NUM_O2_CTX * 254) as one
         // contiguous block, THEN all totals (NUM_O2_CTX) as a second block.
-        // (Prior to the fix, load read these interleaved per-context, which
-        // silently corrupted every dictionary whose contexts weren't all
-        // empty — the consistency check below would reject a context's total
-        // read from the next context's first count.)
         let mut o2_lit_counts = [[0u32; 254]; NUM_O2_CTX];
         let mut o2_lit_totals = [0u32; NUM_O2_CTX];
         let mut computed_totals = [0u64; NUM_O2_CTX];
@@ -942,7 +1062,7 @@ impl ProbabilityPredictor for NeuralSsmPredictor {
             return false;
         }
 
-        // All validation passed — commit state
+        // All validation passed — commit state and rebuild Fenwick trees
         self.h = h;
         self.w_run = w_run;
         self.b_run = b_run;
@@ -951,6 +1071,9 @@ impl ProbabilityPredictor for NeuralSsmPredictor {
         self.ssm_perf = ssm_perf;
         self.rle_perf = rle_perf;
         *self.o2_lit_counts = o2_lit_counts;
+        for ctx in 0..NUM_O2_CTX {
+            fenwick254_rebuild(&mut self.o2_lit_fenwick[ctx], &self.o2_lit_counts[ctx]);
+        }
         self.o2_lit_totals = o2_lit_totals;
         self.prev_byte = prev_byte;
         self.prev_prev_byte = prev_prev_byte;

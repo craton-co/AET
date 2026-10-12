@@ -66,19 +66,69 @@ impl ExactDivisor {
 }
 
 /// Adaptive order-0 (unigram) frequency model with Laplace smoothing.
+///
+/// Maintains a 1-indexed 256-entry Fenwick tree alongside `counts` and uses
+/// the overshoot-free `RESERVED = 256` monotone quantizer (`symbol + (cum * (PROB_TOTAL - 256)) / total`),
+/// enabling O(log 256) `query_cdf` and O(log 256) `decode_symbol` without
+/// chained monotonicity fixups or float fallbacks.
 pub struct Order0Model {
     /// Frequency count for each byte value. Starts at 1 (Laplace prior).
     counts: [u32; 256],
+    /// 1-indexed Fenwick tree over `counts` for O(log 256) prefix queries and binary lifting.
+    fenwick: [u32; 256],
     /// Sum of all counts. Maintained incrementally for speed.
     total: u32,
 }
 
 impl Order0Model {
     pub fn new() -> Self {
+        let counts = [1u32; 256];
+        let mut fenwick = [0u32; 256];
+        Self::rebuild_fenwick(&mut fenwick, &counts);
         Self {
-            counts: [1; 256],
+            counts,
+            fenwick,
             total: 256, // 256 * 1
         }
+    }
+
+    #[inline]
+    fn rebuild_fenwick(fenwick: &mut [u32; 256], counts: &[u32; 256]) {
+        *fenwick = *counts;
+        for idx in 1..=256usize {
+            let parent = idx + (idx & idx.wrapping_neg());
+            if parent <= 256 {
+                fenwick[parent - 1] += fenwick[idx - 1];
+            }
+        }
+    }
+
+    #[inline]
+    fn fenwick_add(&mut self, i: usize, delta: u32) {
+        let mut idx = i + 1;
+        while idx <= 256 {
+            self.fenwick[idx - 1] += delta;
+            idx += idx & idx.wrapping_neg();
+        }
+    }
+
+    #[inline]
+    fn fenwick_prefix(&self, len: usize) -> u32 {
+        let mut sum = 0u32;
+        let mut idx = len;
+        while idx > 0 {
+            sum += self.fenwick[idx - 1];
+            idx &= idx - 1;
+        }
+        sum
+    }
+
+    #[inline(always)]
+    fn quantize_boundary(divisor: &ExactDivisor, cum: u32, symbol_index: usize) -> u32 {
+        use crate::coding::rans::PROB_TOTAL;
+        const RESERVED: u64 = 256;
+        const SCALABLE: u64 = PROB_TOTAL as u64 - RESERVED;
+        symbol_index as u32 + divisor.div((cum as u64) * SCALABLE) as u32
     }
 }
 
@@ -98,43 +148,25 @@ impl ProbabilityPredictor for Order0Model {
         probs
     }
 
-    /// Build CDF directly from integer counts, bypassing float conversion.
+    /// Build 15-bit monotone CDF directly from integer counts using the
+    /// overshoot-free `RESERVED = 256` quantizer.
     fn predict_cdf(&mut self) -> [u16; 257] {
         use crate::coding::rans::PROB_TOTAL;
 
         let mut cdf = [0u16; 257];
-
-        // Scale integer counts to 15-bit CDF using cumulative rounding.
-        // `ExactDivisor` replaces 256 hardware divides with 256 multiplies
-        // and produces bit-identical results.
-        let total = self.total;
-        let divisor = ExactDivisor::new(total);
-        let half = (total / 2) as u64;
-        let mut cum = 0u64;
+        let divisor = ExactDivisor::new(self.total);
+        let mut cum = 0u32;
         for (i, cdf_val) in cdf.iter_mut().enumerate().take(256) {
-            *cdf_val = divisor.div(cum * PROB_TOTAL as u64 + half) as u16;
-            cum += self.counts[i] as u64;
+            *cdf_val = Self::quantize_boundary(&divisor, cum, i) as u16;
+            cum += self.counts[i];
         }
         cdf[256] = PROB_TOTAL as u16;
-
-        // Ensure strict monotonicity (Laplace prior guarantees counts >= 1,
-        // but quantization can still collapse small symbols).
-        for i in 0..256 {
-            if cdf[i + 1] <= cdf[i] {
-                cdf[i + 1] = cdf[i] + 1;
-            }
-        }
-
-        // If fixup overshot, fall back to general probs_to_cdf.
-        if cdf[256] != PROB_TOTAL as u16 {
-            return crate::coding::rans::probs_to_cdf(&self.predict());
-        }
-
         cdf
     }
 
     fn update(&mut self, byte: u8) {
-        self.counts[byte as usize] += 1;
+        let b = byte as usize;
+        self.counts[b] += 1;
         self.total += 1;
 
         // Periodic rescaling to adapt to local statistics and prevent overflow.
@@ -145,122 +177,63 @@ impl ProbabilityPredictor for Order0Model {
                 *c = (*c >> 1).max(1);
                 self.total += *c;
             }
+            Self::rebuild_fenwick(&mut self.fenwick, &self.counts);
+        } else {
+            self.fenwick_add(b, 1);
         }
     }
 
     fn reset(&mut self) {
         self.counts = [1; 256];
+        Self::rebuild_fenwick(&mut self.fenwick, &self.counts);
         self.total = 256;
     }
 
-    /// Fast path: read only the two CDF entries the encoder needs
-    /// (`cdf[byte]` and `cdf[byte+1]`), bit-identical to what `predict_cdf`
-    /// would produce.
-    ///
-    /// **Correctness contract.** The decoder uses `predict_cdf`, which:
-    /// 1. computes each `cdf[i]` by cumulative integer rounding, then
-    /// 2. applies a forward monotonicity fix-up that can chain — bumping
-    ///    `cdf[i]` may force bumping `cdf[i+1]`, and so on, and
-    /// 3. falls back to [`crate::coding::rans::probs_to_cdf`] entirely if
-    ///    that fix-up pushed `cdf[256]` past `PROB_TOTAL`.
-    ///
-    /// All three steps must be reproduced exactly. Step 3 is the subtle
-    /// one: it is a *whole-table* decision, so it cannot be observed from a
-    /// sweep that stops at `byte + 1`. An earlier revision only checked the
-    /// `s == 255` anchor and trusted the invariant elsewhere; that silently
-    /// desynchronised encoder and decoder on skewed distributions (e.g. the
-    /// float-exponent planes fed to `byteplane_encode`), producing archives
-    /// whose blocks failed to decode. See
-    /// `query_cdf_matches_predict_cdf_on_skewed_counts`.
-    ///
-    /// Two regimes:
-    ///
-    /// * `total <= PROB_TOTAL` — every symbol holds at least one count
-    ///   (Laplace prior), so every rounded gap is `>= 1`, the fix-up never
-    ///   fires and overshoot is impossible. The partial sweep up to
-    ///   `byte + 1` is then exact, and the upper `254 - s` rounding
-    ///   divisions, the fix-up sweep, and the 514-byte `[u16; 257]` return
-    ///   are all skipped.
-    /// * `total > PROB_TOTAL` — a rounded gap can collapse to zero, so we
-    ///   replay the full forward sweep (without materialising the table)
-    ///   and delegate to `predict_cdf` when it would have overshot.
+    /// Encode-side fast path: compute `(cdf[byte], cdf[byte + 1])` in O(log 256)
+    /// using the Fenwick tree and `ExactDivisor`, bit-identical to `predict_cdf`.
+    #[inline]
     fn query_cdf(&mut self, byte: u8) -> (u16, u16) {
         use crate::coding::rans::PROB_TOTAL;
         let s = byte as usize;
         let divisor = ExactDivisor::new(self.total);
-        let total = self.total as u64;
-        let half = total / 2;
-        let scale = PROB_TOTAL as u64;
-
-        if total <= scale {
-            // No fix-up possible: gap_i = round((cum+c_i)·S/T) - round(cum·S/T)
-            // is at least floor(c_i · S / T) >= 1 because c_i >= 1 and T <= S.
-            let mut cum: u64 = 0;
-            for &count in &self.counts[..s] {
-                cum += count as u64;
-            }
-            let lo = divisor.div(cum * scale + half) as u16;
-            let hi = if s == 255 {
-                PROB_TOTAL as u16
-            } else {
-                divisor.div((cum + self.counts[s] as u64) * scale + half) as u16
-            };
-            return (lo, hi);
-        }
-
-        // Full forward sweep, mirroring predict_cdf's rounding + chained
-        // monotonicity fix-up, but keeping only the two entries we need.
-        // `prev` ends as cdf[255], which is what decides the overshoot.
-        let mut prev: u16 = 0; // cdf[0] == 0
-        let mut cum: u64 = 0;
-        let mut cdf_s: u16 = 0;
-        let mut cdf_s1: u16 = 0;
-        for i in 1..256 {
-            cum += self.counts[i - 1] as u64;
-            let mut val = divisor.div(cum * scale + half) as u16;
-            if val <= prev {
-                val = prev + 1;
-            }
-            if i == s {
-                cdf_s = val;
-            } else if i == s + 1 {
-                cdf_s1 = val;
-            }
-            prev = val;
-        }
-
-        // predict_cdf pins cdf[256] = PROB_TOTAL and then bumps it when
-        // cdf[255] >= PROB_TOTAL; that bump is exactly its overshoot
-        // condition, which rebuilds the whole table via probs_to_cdf.
-        if prev >= PROB_TOTAL as u16 {
-            let cdf = self.predict_cdf();
-            return (cdf[s], cdf[s + 1]);
-        }
-        if s == 255 {
-            cdf_s1 = PROB_TOTAL as u16;
-        }
-
-        (cdf_s, cdf_s1)
+        let cum = self.fenwick_prefix(s);
+        let lo = Self::quantize_boundary(&divisor, cum, s) as u16;
+        let hi = if s == 255 {
+            PROB_TOTAL as u16
+        } else {
+            Self::quantize_boundary(&divisor, cum + self.counts[s], s + 1) as u16
+        };
+        (lo, hi)
     }
 
-    // No `decode_symbol` override.
-    //
-    // The obvious one — resolve the symbol during the rounding sweep instead
-    // of materialising the table — measured *slower* than the trait default
-    // (0.90x on a BWT+MTF+RLE stream, 0.52x on a skewed byte plane). Two
-    // reasons, both structural:
-    //
-    //  * The forward monotonicity fix-up chains, so unlike
-    //    `NeuralSsmPredictor` the boundaries cannot be binary-searched;
-    //    the sweep runs to `i = 255` either way.
-    //  * The overshoot fallback is a whole-table decision, only known at
-    //    `i = 255`. When it fires — which is the common case on the skewed
-    //    planes byte-plane blocks are made of — the sweep is wasted and the
-    //    table is rebuilt anyway, so the fused loop pays for it twice.
-    //
-    // `predict_cdf` + the decoder's `find_symbol` is the faster shape here.
-    // The divide-free `ExactDivisor` above is where this model's decode win
-    // actually comes from (2.25x on CDF construction).
+    /// Decode-side fast path: resolve `freq` in 8 Fenwick binary-lifting steps
+    /// (O(log 256) multiply-shifts) without building the 257-entry CDF table.
+    #[inline]
+    fn decode_symbol(&mut self, freq: u32) -> (u8, u16, u16) {
+        use crate::coding::rans::PROB_TOTAL;
+        debug_assert!(freq < PROB_TOTAL);
+
+        let divisor = ExactDivisor::new(self.total);
+        let mut lo = 0usize;
+        let mut cum = 0u32;
+        let mut lo_value = 0u32;
+        let mut hi_value = PROB_TOTAL;
+
+        for step in [128usize, 64, 32, 16, 8, 4, 2, 1] {
+            let cand = lo + step;
+            let cand_cum = cum + self.fenwick[cand - 1];
+            let mid_value = Self::quantize_boundary(&divisor, cand_cum, cand);
+            if mid_value <= freq {
+                lo = cand;
+                cum = cand_cum;
+                lo_value = mid_value;
+            } else {
+                hi_value = mid_value;
+            }
+        }
+
+        (lo as u8, lo_value as u16, hi_value as u16)
+    }
 
     fn name(&self) -> &str {
         "order-0"
@@ -318,6 +291,7 @@ impl ProbabilityPredictor for Order0Model {
             return false; // Would overflow u32 total
         }
         self.counts = counts;
+        Self::rebuild_fenwick(&mut self.fenwick, &self.counts);
         self.total = total as u32;
         true
     }
