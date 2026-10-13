@@ -62,14 +62,30 @@ impl BytePlaneWidth {
 pub fn byteplane_split(data: &[u8], width: BytePlaneWidth) -> (Vec<Vec<u8>>, Vec<u8>) {
     let w = width.planes();
     let n_elements = data.len() / w;
-    let _tail_len = data.len() % w;
 
-    let mut planes: Vec<Vec<u8>> = (0..w).map(|_| Vec::with_capacity(n_elements)).collect();
+    let mut planes: Vec<Vec<u8>> = (0..w).map(|_| vec![0u8; n_elements]).collect();
 
     let bulk = &data[..n_elements * w];
-    for chunk in bulk.chunks_exact(w) {
-        for (plane_idx, &byte) in chunk.iter().enumerate() {
-            planes[plane_idx].push(byte);
+    match width {
+        BytePlaneWidth::Two => {
+            let (p0, p1) = planes.split_at_mut(1);
+            let (p0, p1) = (&mut p0[0], &mut p1[0]);
+            for (i, chunk) in bulk.chunks_exact(2).enumerate() {
+                p0[i] = chunk[0];
+                p1[i] = chunk[1];
+            }
+        }
+        BytePlaneWidth::Four => {
+            let (p01, p23) = planes.split_at_mut(2);
+            let (p0, p1) = p01.split_at_mut(1);
+            let (p2, p3) = p23.split_at_mut(1);
+            let (p0, p1, p2, p3) = (&mut p0[0], &mut p1[0], &mut p2[0], &mut p3[0]);
+            for (i, chunk) in bulk.chunks_exact(4).enumerate() {
+                p0[i] = chunk[0];
+                p1[i] = chunk[1];
+                p2[i] = chunk[2];
+                p3[i] = chunk[3];
+            }
         }
     }
 
@@ -84,47 +100,81 @@ pub fn byteplane_merge(planes: &[Vec<u8>], tail: &[u8]) -> Vec<u8> {
     }
     let n_elements = planes[0].len();
     let w = planes.len();
-    let mut data = Vec::with_capacity(n_elements * w + tail.len());
+    let mut data = vec![0u8; n_elements * w + tail.len()];
 
-    for i in 0..n_elements {
-        for plane in planes {
-            data.push(plane[i]);
+    match w {
+        2 => {
+            let (p0, p1) = (&planes[0], &planes[1]);
+            for (i, out) in data[..n_elements * 2].chunks_exact_mut(2).enumerate() {
+                out[0] = p0[i];
+                out[1] = p1[i];
+            }
+        }
+        4 => {
+            let (p0, p1, p2, p3) = (&planes[0], &planes[1], &planes[2], &planes[3]);
+            for (i, out) in data[..n_elements * 4].chunks_exact_mut(4).enumerate() {
+                out[0] = p0[i];
+                out[1] = p1[i];
+                out[2] = p2[i];
+                out[3] = p3[i];
+            }
+        }
+        _ => {
+            for (i, out) in data[..n_elements * w].chunks_exact_mut(w).enumerate() {
+                for (j, plane) in planes.iter().enumerate() {
+                    out[j] = plane[i];
+                }
+            }
         }
     }
-    data.extend_from_slice(tail);
+    data[n_elements * w..].copy_from_slice(tail);
     data
+}
+
+/// Minimum plane entropy sampled from the first `1024` elements across all `w` planes.
+fn min_sampled_plane_entropy(data: &[u8], width: BytePlaneWidth) -> Option<f64> {
+    let w = width.planes();
+    let n_elements = data.len() / w;
+    if n_elements < 32 {
+        return None;
+    }
+
+    let sample_size = n_elements.min(1024);
+    let mut sample_buf = vec![0u8; sample_size];
+    let mut min_entropy = f64::MAX;
+
+    for p in 0..w {
+        for (i, slot) in sample_buf.iter_mut().enumerate() {
+            *slot = data[i * w + p];
+        }
+        let ent = shannon_entropy(&sample_buf);
+        if ent < min_entropy {
+            min_entropy = ent;
+        }
+    }
+
+    Some(min_entropy)
 }
 
 /// Check if byte-plane splitting with the given width would be beneficial.
 ///
 /// Returns `true` if at least one plane has significantly lower entropy than
-/// the raw data (indicating structured numeric content).
+/// the raw data (indicating structured numeric content, regardless of endianness
+/// or chunk alignment).
 pub fn is_byteplane_beneficial(data: &[u8], width: BytePlaneWidth) -> bool {
     if data.len() < MIN_BYTEPLANE_SIZE {
         return false;
     }
 
-    let w = width.planes();
-    let n_elements = data.len() / w;
-    if n_elements < 32 {
+    let Some(min_plane_entropy) = min_sampled_plane_entropy(data, width) else {
         return false;
-    }
+    };
 
     let raw_entropy = shannon_entropy(data);
 
-    // Quick check: sample first plane entropy from a prefix
-    let sample_size = n_elements.min(1024);
-    let mut plane0_sample = Vec::with_capacity(sample_size);
-    for i in 0..sample_size {
-        plane0_sample.push(data[i * w]);
-    }
-
-    let plane0_entropy = shannon_entropy(&plane0_sample);
-
-    // Beneficial if the MSB plane has at least 1.5 bps lower entropy than raw.
-    // This catches float exponent bytes (3-5 bps vs 6-8 bps raw) while
-    // avoiding false positives on text or already-compressed data.
-    raw_entropy - plane0_entropy > 1.5
+    // Beneficial if any plane (e.g. MSB/exponent in big-endian, little-endian,
+    // or unaligned chunk) has at least 1.5 bps lower entropy than raw.
+    raw_entropy - min_plane_entropy > 1.5
 }
 
 /// Determine which planes should be compressed vs stored raw.
@@ -147,10 +197,10 @@ fn delta_encode(plane: &[u8]) -> Vec<u8> {
     if plane.is_empty() {
         return Vec::new();
     }
-    let mut out = Vec::with_capacity(plane.len());
-    out.push(plane[0]);
+    let mut out = vec![0u8; plane.len()];
+    out[0] = plane[0];
     for i in 1..plane.len() {
-        out.push(plane[i].wrapping_sub(plane[i - 1]));
+        out[i] = plane[i].wrapping_sub(plane[i - 1]);
     }
     out
 }
@@ -178,34 +228,28 @@ fn should_delta(plane: &[u8]) -> bool {
 
 /// Detect if data is likely an array of numeric values at the given width.
 ///
-/// Uses a simple heuristic: checks if byte-plane splitting reveals
-/// significantly non-uniform distributions in the MSB plane.
+/// Checks if byte-plane splitting reveals significantly non-uniform
+/// distributions in any plane (supporting both little-endian and big-endian
+/// numeric arrays as well as unaligned FastCDC chunks).
 pub fn detect_numeric_width(data: &[u8]) -> Option<BytePlaneWidth> {
     if data.len() < MIN_BYTEPLANE_SIZE {
         return None;
     }
 
-    // Try width=4 first (FP32 is most common), then width=2
-    // Pick whichever shows the strongest plane entropy differential
+    let raw_entropy = shannon_entropy(data);
+
+    // Evaluate width=2 first, then width=4. Since a 2-byte periodic signal
+    // (like BF16/FP16) also repeats every 4 bytes, width=4 must improve over
+    // width=2 by a meaningful margin (0.25 bps) to be selected over width=2.
     let mut best: Option<(BytePlaneWidth, f64)> = None;
 
-    for &width in &[BytePlaneWidth::Four, BytePlaneWidth::Two] {
-        let w = width.planes();
-        let n_elements = data.len() / w;
-        if n_elements < 32 {
+    for &width in &[BytePlaneWidth::Two, BytePlaneWidth::Four] {
+        let Some(min_plane_entropy) = min_sampled_plane_entropy(data, width) else {
             continue;
-        }
+        };
 
-        // Sample MSB plane entropy
-        let sample_size = n_elements.min(1024);
-        let mut plane0 = Vec::with_capacity(sample_size);
-        for i in 0..sample_size {
-            plane0.push(data[i * w]);
-        }
-        let plane0_entropy = shannon_entropy(&plane0);
-
-        let benefit = shannon_entropy(data) - plane0_entropy;
-        if benefit > 1.5 && best.as_ref().is_none_or(|(_, b)| benefit > *b) {
+        let benefit = raw_entropy - min_plane_entropy;
+        if benefit > 1.5 && best.as_ref().is_none_or(|(_, b)| benefit > *b + 0.25) {
             best = Some((width, benefit));
         }
     }
@@ -249,29 +293,30 @@ pub fn byteplane_encode(data: &[u8], width: BytePlaneWidth) -> Option<Vec<u8>> {
         return None;
     }
 
-    // Encode each plane
-    let mut encoded_planes: Vec<Vec<u8>> = Vec::with_capacity(w);
-    for (i, plane) in maybe_delta_planes.iter().enumerate() {
+    let encode_one = |(i, plane): (usize, &Vec<u8>)| -> Vec<u8> {
         if (rc_flags >> i) & 1 == 1 {
-            // RC-compress this plane with Order0
             let mut predictor = Order0Model::new();
             match rans::encode_block(plane, &mut predictor) {
-                Ok(rc_bytes) => {
-                    if rc_bytes.len() < plane.len() {
-                        encoded_planes.push(rc_bytes);
-                    } else {
-                        encoded_planes.push(plane.clone());
-                    }
-                }
-                Err(_) => {
-                    encoded_planes.push(plane.clone());
-                }
+                Ok(rc_bytes) if rc_bytes.len() < plane.len() => rc_bytes,
+                _ => plane.clone(),
             }
         } else {
-            // Store raw
-            encoded_planes.push(plane.clone());
+            plane.clone()
         }
-    }
+    };
+
+    #[cfg(feature = "threading")]
+    let encoded_planes: Vec<Vec<u8>> = {
+        use rayon::prelude::*;
+        let indexed: Vec<(usize, &Vec<u8>)> = maybe_delta_planes.iter().enumerate().collect();
+        indexed.into_par_iter().map(encode_one).collect()
+    };
+    #[cfg(not(feature = "threading"))]
+    let encoded_planes: Vec<Vec<u8>> = maybe_delta_planes
+        .iter()
+        .enumerate()
+        .map(encode_one)
+        .collect();
 
     // Recompute RC flags based on what actually compressed
     let mut actual_rc_flags: u8 = 0;

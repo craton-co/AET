@@ -213,8 +213,17 @@ pub fn recommend_method_for(entropy: f64, content_type: ContentType) -> Recommen
                 RecommendedMethod::Zstd
             }
         }
-        // Numeric data: predictor with byte-plane splitting
-        ContentType::NumericData => recommend_method(entropy),
+        // Numeric data: predictor with byte-plane splitting (FP32 arrays have
+        // 3 random mantissa bytes and 1 clustered exponent byte, giving overall
+        // chunk entropy ~7.6-7.8 bps even though byte-plane splitting compresses
+        // the exponent plane significantly).
+        ContentType::NumericData => {
+            if entropy > INCOMPRESSIBLE_THRESHOLD {
+                RecommendedMethod::Store
+            } else {
+                RecommendedMethod::PredictorRans
+            }
+        }
         // Text, code, structured: predictor shines
         _ => recommend_method(entropy),
     }
