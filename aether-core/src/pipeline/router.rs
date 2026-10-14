@@ -84,6 +84,25 @@ pub fn compress_chunk(
     content_type: crate::format::ContentType,
     profile: CompressionProfile,
 ) -> Result<CompressedChunk> {
+    compress_chunk_with_baseline(
+        chunk,
+        predictor.coding_baseline(),
+        content_type,
+        profile,
+    )
+}
+
+/// Compress a chunk given the optional dictionary coding baseline directly.
+///
+/// Mirrors [`decompress_chunk_with_baseline`]: callers compressing many chunks
+/// in parallel can resolve the dictionary baseline once instead of constructing
+/// a group predictor per worker thread.
+pub fn compress_chunk_with_baseline(
+    chunk: &ChunkRef<'_>,
+    dict_baseline: Option<&[u8]>,
+    content_type: crate::format::ContentType,
+    profile: CompressionProfile,
+) -> Result<CompressedChunk> {
     let fast_route = profile == CompressionProfile::Fast
         || (profile == CompressionProfile::Balanced
             && matches!(
@@ -136,19 +155,6 @@ pub fn compress_chunk(
         RecommendedMethod::PredictorRans => {
             let mut best: Option<(CompressionMethod, Vec<u8>)> = None;
 
-            // Single scratch predictor reused across all trial paths.
-            // encode_block() calls predictor.reset() at the start of every
-            // call, so state from a failed trial never bleeds into the next.
-            // Saves 2 heap allocations (~25 KiB each) per chunk.
-            let mut scratch = NeuralSsmPredictor::new();
-            // Stage A: if the configured predictor carries a dictionary
-            // baseline (only NeuralSSM does), propagate it so the BWT/LZ77/
-            // plain coding starts each block from the pretrained distribution.
-            // decode mirrors this in decompress_chunk via the same dictionary.
-            if let Some(baseline) = predictor.coding_baseline() {
-                scratch.set_dict_baseline(baseline);
-            }
-
             // ── Try byte-plane splitting (numeric data fast path) ────
             // For NumericData content, try byte-plane first and skip
             // BWT/LZ77 if it wins decisively. For other content types,
@@ -184,104 +190,97 @@ pub fn compress_chunk(
                 }
             }
 
-            // ── Try BWT+MTF+RLE → predictor + range coding ────────────
-            // BWT clusters context; MTF converts to small integers; RLE
-            // compacts zero runs using bijective base-2 (RUNA/RUNB).
-            // The predictor sees the RLE stream, not the raw MTF stream.
-            // bwt_mtf_encode_parts returns Err if input exceeds MAX_BWT_INPUT_SIZE;
-            // we treat that as "BWT not applicable" and fall through to LZ77/plain.
-            //
-            // Skip BWT for high-entropy chunks — suffix array construction
-            // is expensive and BWT clustering provides minimal benefit on
-            // near-random data.  Text is typically 4-5 bps.
-            // The shared threshold is also used by transformed dictionary
-            // training so the two paths cannot silently diverge.
-            //
-            // Gated on `bwt-encode`: the forward transform needs libsais.
-            // A decompress-only build (wasm) still *decodes* BwtPredictorRans
-            // blocks — only the encode-side trial is unavailable, so the
-            // cascade falls through to LZ77/plain/Zstd.
-            #[cfg(feature = "bwt-encode")]
-            if chunk.data.len() >= 8 && chunk.entropy < BWT_ENTROPY_SKIP {
-                if let Ok((primary_index, mtf_data)) =
-                    bwt_preprocess::bwt_mtf_encode_parts(chunk.data)
-                {
-                    // Try RLE first (much more compact); fall back to raw MTF
-                    let (encode_data, rle_applied) =
-                        if let Some(rle) = bwt_preprocess::rle_encode(&mtf_data) {
-                            (rle, true)
-                        } else {
-                            (mtf_data, false)
-                        };
+            let numeric_byteplane_won = is_numeric && best.is_some();
+            // High-entropy NumericData chunks (> 7.5 bps) only enter PredictorRans
+            // so byte-plane splitting can be attempted; if byte-plane did not win,
+            // skip BWT/LZ77/plain-NeuralSSM and fall straight to Zstd/Store.
+            let skip_neural_trials =
+                numeric_byteplane_won || (is_numeric && chunk.entropy > analyzer::HIGH_ENTROPY_THRESHOLD);
 
-                    if let Ok(rc_bytes) = rans::encode_block(&encode_data, &mut scratch) {
-                        // Payload: [flags: u8] [primary_index: u32] [encoded_len: u32] [RC bytes]
-                        let flags: u8 = if rle_applied { 1 } else { 0 };
-                        let encoded_len = encode_data.len() as u32;
-                        let mut payload = Vec::with_capacity(1 + 4 + 4 + rc_bytes.len());
-                        payload.push(flags);
-                        payload.extend_from_slice(&primary_index.to_le_bytes());
-                        payload.extend_from_slice(&encoded_len.to_le_bytes());
-                        payload.extend_from_slice(&rc_bytes);
+            if !skip_neural_trials {
+                // Single scratch predictor reused across all trial paths.
+                // encode_block() calls predictor.reset() at the start of every
+                // call, so state from a failed trial never bleeds into the next.
+                let mut scratch = coding_predictor(dict_baseline);
 
-                        if payload.len() < chunk.data.len() {
-                            best = Some((CompressionMethod::BwtPredictorRans, payload));
-                        }
-                    }
-                }
-            }
+                // ── Try BWT+MTF+RLE → predictor + range coding ────────────
+                #[cfg(feature = "bwt-encode")]
+                if chunk.data.len() >= 8 && chunk.entropy < BWT_ENTROPY_SKIP {
+                    if let Ok((primary_index, mtf_data)) =
+                        bwt_preprocess::bwt_mtf_encode_parts(chunk.data)
+                    {
+                        // Apply bijective base-2 zero-run RLE: standard shift (flags=1)
+                        // when MTF rank 255 is absent, or escaped RLE (flags=2) when
+                        // all 256 byte values appear in the chunk.
+                        let (encode_data, flags) =
+                            if let Some(rle) = bwt_preprocess::rle_encode(&mtf_data) {
+                                (rle, 1u8)
+                            } else {
+                                (bwt_preprocess::rle_encode_escaped(&mtf_data), 2u8)
+                            };
 
-            // ── Try LZ77 → predictor + range coding ──────────────────
-            // Skip if BWT already compressed below BWT_DECISIVE_RATIO —
-            // LZ77 won't beat it on text, and we can skip predictor sync.
-            // Use division instead of multiplication to avoid overflow for
-            // large chunks (b.len() * 100 could overflow usize).
-            let bwt_decisive = best.as_ref().is_some_and(|(_, b)| {
-                !chunk.data.is_empty() && b.len() < chunk.data.len() / 100 * BWT_DECISIVE_RATIO
-            });
-            if !bwt_decisive {
-                if let Some(lz_bytes) = lz77_preprocess::lz77_encode(chunk.data) {
-                    // Reuse scratch predictor (encode_block resets it first).
-                    if let Ok(rc_bytes) = rans::encode_block(&lz_bytes, &mut scratch) {
-                        let lz_len = lz_bytes.len() as u32;
+                        if let Ok(rc_bytes) = rans::encode_block(&encode_data, &mut scratch) {
+                            // Payload: [flags: u8] [primary_index: u32] [encoded_len: u32] [RC bytes]
+                            let encoded_len = encode_data.len() as u32;
+                            let mut payload = Vec::with_capacity(1 + 4 + 4 + rc_bytes.len());
+                            payload.push(flags);
+                            payload.extend_from_slice(&primary_index.to_le_bytes());
+                            payload.extend_from_slice(&encoded_len.to_le_bytes());
+                            payload.extend_from_slice(&rc_bytes);
 
-                        let mut payload = Vec::with_capacity(4 + rc_bytes.len());
-                        payload.extend_from_slice(&lz_len.to_le_bytes());
-                        payload.extend_from_slice(&rc_bytes);
-
-                        if payload.len() < chunk.data.len() {
-                            let is_better =
-                                best.as_ref().is_none_or(|(_, b)| payload.len() < b.len());
-                            if is_better {
-                                best = Some((CompressionMethod::Lz77PredictorRans, payload));
+                            if payload.len() < chunk.data.len() {
+                                best = Some((CompressionMethod::BwtPredictorRans, payload));
                             }
                         }
                     }
                 }
-            }
 
-            // ── Try byte-plane splitting (non-numeric fallback) ─────
-            // For non-text, non-numeric content, try byte-plane as a
-            // competing method. Executables and structured binary can
-            // contain embedded float tables that benefit from splitting.
-            if !is_numeric && content_type != ContentType::Text {
-                if let Some(width) = byteplane_preprocess::detect_numeric_width(chunk.data) {
-                    if let Some(payload) = byteplane_preprocess::byteplane_encode(chunk.data, width)
-                    {
-                        let is_better = best.as_ref().is_none_or(|(_, b)| payload.len() < b.len());
-                        if payload.len() < chunk.data.len() && is_better {
-                            best = Some((CompressionMethod::BytePlanePredictorRans, payload));
+                // ── Try LZ77 → predictor + range coding ──────────────────
+                let bwt_decisive = best.as_ref().is_some_and(|(_, b)| {
+                    !chunk.data.is_empty() && b.len() < chunk.data.len() / 100 * BWT_DECISIVE_RATIO
+                });
+                if !bwt_decisive {
+                    if let Some(lz_bytes) = lz77_preprocess::lz77_encode(chunk.data) {
+                        // Reuse scratch predictor (encode_block resets it first).
+                        if let Ok(rc_bytes) = rans::encode_block(&lz_bytes, &mut scratch) {
+                            let lz_len = lz_bytes.len() as u32;
+
+                            let mut payload = Vec::with_capacity(4 + rc_bytes.len());
+                            payload.extend_from_slice(&lz_len.to_le_bytes());
+                            payload.extend_from_slice(&rc_bytes);
+
+                            if payload.len() < chunk.data.len() {
+                                let is_better =
+                                    best.as_ref().is_none_or(|(_, b)| payload.len() < b.len());
+                                if is_better {
+                                    best = Some((CompressionMethod::Lz77PredictorRans, payload));
+                                }
+                            }
                         }
                     }
                 }
-            }
 
-            // ── Try plain predictor + range coding ───────────────────
-            // Reuse scratch predictor (encode_block resets it first).
-            if best.is_none() {
-                if let Ok(rc_bytes) = rans::encode_block(chunk.data, &mut scratch) {
-                    if rc_bytes.len() < chunk.data.len() {
-                        best = Some((CompressionMethod::PredictorRans, rc_bytes));
+                // ── Try byte-plane splitting (non-numeric fallback) ─────
+                if !is_numeric && content_type != ContentType::Text {
+                    if let Some(width) = byteplane_preprocess::detect_numeric_width(chunk.data) {
+                        if let Some(payload) =
+                            byteplane_preprocess::byteplane_encode(chunk.data, width)
+                        {
+                            let is_better =
+                                best.as_ref().is_none_or(|(_, b)| payload.len() < b.len());
+                            if payload.len() < chunk.data.len() && is_better {
+                                best = Some((CompressionMethod::BytePlanePredictorRans, payload));
+                            }
+                        }
+                    }
+                }
+
+                // ── Try plain predictor + range coding ───────────────────
+                if best.is_none() {
+                    if let Ok(rc_bytes) = rans::encode_block(chunk.data, &mut scratch) {
+                        if rc_bytes.len() < chunk.data.len() {
+                            best = Some((CompressionMethod::PredictorRans, rc_bytes));
+                        }
                     }
                 }
             }
@@ -423,7 +422,11 @@ pub fn decompress_chunk_with_baseline(
                 )));
             }
             let flags = compressed_data[0];
-            let rle_applied = (flags & 1) != 0;
+            if flags > 2 {
+                return Err(AetherError::Decompression(format!(
+                    "BwtPredictorRans: invalid flags byte {flags:#04x}"
+                )));
+            }
             let primary_index =
                 u32::from_le_bytes(compressed_data[1..5].try_into().map_err(|_| {
                     AetherError::Decompression(
@@ -438,8 +441,6 @@ pub fn decompress_chunk_with_baseline(
                 })?) as usize;
 
             // Bounds check: encoded_len must be ≤ MAX_DECOMPRESSED_BLOCK_SIZE.
-            // BWT doesn't expand data (MTF output = input length), and RLE can
-            // only shrink it, so encoded_len should be ≤ uncompressed_size.
             if encoded_len > MAX_DECOMPRESSED_BLOCK_SIZE {
                 return Err(AetherError::ResourceLimitExceeded(format!(
                     "BWT encoded_len {} exceeds safety limit {} (uncompressed_size={})",
@@ -455,11 +456,11 @@ pub fn decompress_chunk_with_baseline(
             let mut bwt_predictor = coding_predictor(dict_baseline);
             let encode_data = rans::decode_block(rc_bytes, encoded_len, &mut bwt_predictor)?;
 
-            // Undo RLE if applied, then undo BWT+MTF
-            let mtf_data = if rle_applied {
-                bwt_preprocess::rle_decode(&encode_data, uncompressed_size)?
-            } else {
-                encode_data
+            // Undo RLE (escaped or standard) if applied, then undo BWT+MTF
+            let mtf_data = match flags {
+                2 => bwt_preprocess::rle_decode_escaped(&encode_data, uncompressed_size)?,
+                1 => bwt_preprocess::rle_decode(&encode_data, uncompressed_size)?,
+                _ => encode_data,
             };
 
             let original =

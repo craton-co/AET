@@ -422,6 +422,117 @@ pub fn rle_decode(rle_data: &[u8], expected_size: usize) -> Result<Vec<u8>> {
     Ok(output)
 }
 
+/// Encode MTF output using bijective base-2 zero-run RLE with escape sequences
+/// for MTF ranks 254 and 255.
+///
+/// Used when `mtf_data` contains `255` (all 256 byte values present in the block):
+/// - Zero runs → bijective base-2 digits `0` (`RUNA`) and `1` (`RUNB`)
+/// - Non-zero values `1..=253` → shifted by `+1` to `2..=254`
+/// - Non-zero value `254` → escaped as `[255, 2]`
+/// - Non-zero value `255` → escaped as `[255, 3]`
+///
+/// Using `2` and `3` as escape suffixes guarantees that `0` and `1` never appear
+/// outside zero runs, preserving the predictor's zero-run context.
+pub fn rle_encode_escaped(mtf_data: &[u8]) -> Vec<u8> {
+    let mut output = Vec::with_capacity(mtf_data.len());
+    let mut i = 0;
+
+    while i < mtf_data.len() {
+        let v = mtf_data[i];
+        if v == 0 {
+            let mut run_len: u32 = 0;
+            while i < mtf_data.len() && mtf_data[i] == 0 {
+                run_len += 1;
+                i += 1;
+            }
+            encode_run_length(&mut output, run_len);
+        } else if v < 254 {
+            output.push(v + 1);
+            i += 1;
+        } else if v == 254 {
+            output.push(255);
+            output.push(2);
+            i += 1;
+        } else {
+            // v == 255
+            output.push(255);
+            output.push(3);
+            i += 1;
+        }
+    }
+
+    output
+}
+
+/// Decode escaped bijective base-2 zero-run RLE (`flags = 2`) back to MTF stream.
+pub fn rle_decode_escaped(rle_data: &[u8], expected_size: usize) -> Result<Vec<u8>> {
+    let mut output = Vec::with_capacity(expected_size);
+    let mut i = 0;
+
+    while i < rle_data.len() {
+        let sym = rle_data[i];
+        if sym <= 1 {
+            let mut run_len: u64 = 0;
+            let mut power: u64 = 1;
+            while i < rle_data.len() && rle_data[i] <= 1 {
+                run_len = run_len.saturating_add((rle_data[i] as u64 + 1).saturating_mul(power));
+                power = power.saturating_mul(2);
+                i += 1;
+            }
+            let remaining = expected_size.saturating_sub(output.len()) as u64;
+            if run_len > remaining {
+                return Err(AetherError::Decompression(format!(
+                    "RLE zero-run length {} exceeds remaining output capacity {}",
+                    run_len, remaining,
+                )));
+            }
+            output.resize(output.len() + run_len as usize, 0);
+        } else if sym == 255 {
+            if i + 1 >= rle_data.len() {
+                return Err(AetherError::Decompression(
+                    "RLE escaped decode: truncated escape sequence at end of stream".into(),
+                ));
+            }
+            if output.len() >= expected_size {
+                return Err(AetherError::Decompression(format!(
+                    "RLE escaped decode: symbol at position {} would exceed expected size {}",
+                    i, expected_size,
+                )));
+            }
+            match rle_data[i + 1] {
+                2 => output.push(254),
+                3 => output.push(255),
+                other => {
+                    return Err(AetherError::Decompression(format!(
+                        "RLE escaped decode: invalid escape suffix {} at position {}",
+                        other,
+                        i + 1,
+                    )))
+                }
+            }
+            i += 2;
+        } else {
+            if output.len() >= expected_size {
+                return Err(AetherError::Decompression(format!(
+                    "RLE escaped decode: non-zero symbol at position {} would exceed expected size {}",
+                    i, expected_size,
+                )));
+            }
+            output.push(sym - 1);
+            i += 1;
+        }
+    }
+
+    if output.len() != expected_size {
+        return Err(AetherError::Decompression(format!(
+            "RLE escaped decode size mismatch: got {}, expected {expected_size}",
+            output.len()
+        )));
+    }
+
+    Ok(output)
+}
+
 // ── Combined API ────────────────────────────────────────────────────────────
 
 #[cfg(feature = "bwt-encode")]
