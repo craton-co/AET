@@ -201,8 +201,21 @@ impl Decompressor {
     /// *and* the archive's predictor type installs a coding baseline (today
     /// only NeuralSSM does). With no dictionary this constructs nothing at
     /// all, which is the common case.
-    pub(crate) fn decode_baseline(&self) -> Result<Option<Vec<u8>>> {
-        let Some(dict) = self.dictionary.as_ref() else {
+    pub(crate) fn decode_baseline_for(
+        &self,
+        archive_dict_hash: &Option<[u8; 32]>,
+    ) -> Result<Option<Vec<u8>>> {
+        let resolved_builtin;
+        let dict = if let Some(dict) = self.dictionary.as_ref() {
+            dict
+        } else if let Some(hash) = archive_dict_hash.as_ref() {
+            if let Some(bdict) = crate::builtin_dicts::by_hash(hash) {
+                resolved_builtin = bdict;
+                &resolved_builtin
+            } else {
+                return Ok(None);
+            }
+        } else {
             return Ok(None);
         };
         // Whether a baseline applies is a property of the predictor type, so
@@ -218,7 +231,8 @@ impl Decompressor {
         }
     }
 
-    /// Validate that the archive's dictionary hash matches the configured dictionary.
+    /// Validate that the archive's dictionary hash matches the configured dictionary
+    /// (or a built-in dictionary embedded in `aether-core`).
     pub(crate) fn validate_dictionary(&self, archive_dict_hash: &Option<[u8; 32]>) -> Result<()> {
         match (archive_dict_hash, &self.dictionary) {
             (Some(hash), Some(dict)) => {
@@ -229,11 +243,17 @@ impl Decompressor {
                 }
                 Ok(())
             }
-            (Some(_), None) => Err(AetherError::Decompression(
-                "Archive was compressed with a dictionary but no dictionary was provided. \
-                     Use with_dictionary() to supply the matching .aed file."
-                    .into(),
-            )),
+            (Some(hash), None) => {
+                if crate::builtin_dicts::by_hash(hash).is_some() {
+                    Ok(())
+                } else {
+                    Err(AetherError::Decompression(
+                        "Archive was compressed with a dictionary but no dictionary was provided. \
+                             Use with_dictionary() to supply the matching .aed file."
+                            .into(),
+                    ))
+                }
+            }
             (None, Some(_)) => {
                 // Dictionary provided but archive doesn't need one — silently ignore
                 Ok(())
@@ -494,6 +514,64 @@ pub(crate) fn reassemble_file_consuming(
         combined.reserve(capacity.saturating_sub(combined.len()));
         for i in (start + 1)..range.end {
             let block = take(i)?;
+            combined.extend_from_slice(&block);
+        }
+    }
+
+    Ok(truncate_to_file_size(file_entry, combined))
+}
+
+/// Count how many [`FileEntry`] records reference each block index in `0..block_count`.
+pub(crate) fn block_ref_counts(file_entries: &[FileEntry], block_count: usize) -> Vec<u32> {
+    let mut counts = vec![0u32; block_count];
+    for entry in file_entries {
+        let start = entry.chunk_start_idx as usize;
+        let end = start.saturating_add(entry.chunk_count as usize).min(block_count);
+        for slot in counts.get_mut(start..end).into_iter().flatten() {
+            *slot = slot.saturating_add(1);
+        }
+    }
+    counts
+}
+
+/// Reassemble a file from `decompressed_blocks`, taking ownership of a block
+/// when its remaining reference count reaches 1, or cloning it when another
+/// deduplicated [`FileEntry`] still references the same block.
+pub(crate) fn reassemble_file_shared(
+    file_entry: &FileEntry,
+    decompressed_blocks: &mut [Option<Vec<u8>>],
+    ref_counts: &mut [u32],
+) -> Result<Vec<u8>> {
+    let Some(range) = file_block_range(file_entry, decompressed_blocks.len())? else {
+        return Ok(Vec::new());
+    };
+
+    let mut take_or_clone = |i: usize| -> Result<Vec<u8>> {
+        let rem = ref_counts.get_mut(i).map(|r| {
+            let cur = *r;
+            *r = cur.saturating_sub(1);
+            cur
+        }).unwrap_or(1);
+        if rem <= 1 {
+            decompressed_blocks[i]
+                .take()
+                .ok_or(AetherError::BlockNotFound(i as u32))
+        } else {
+            decompressed_blocks[i]
+                .as_ref()
+                .cloned()
+                .ok_or(AetherError::BlockNotFound(i as u32))
+        }
+    };
+
+    let start = range.start;
+    let mut combined = take_or_clone(start)?;
+    if range.len() > 1 {
+        let capacity =
+            (file_entry.original_size as usize).min(MAX_TOTAL_DECOMPRESSED_SIZE as usize);
+        combined.reserve(capacity.saturating_sub(combined.len()));
+        for i in (start + 1)..range.end {
+            let block = take_or_clone(i)?;
             combined.extend_from_slice(&block);
         }
     }

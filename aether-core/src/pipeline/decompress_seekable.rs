@@ -13,9 +13,9 @@ use crate::header::{ArchiveFooter, FileEntry, SolidGroupEntry};
 use crate::pipeline::router;
 
 use super::decompress::{
-    derive_decrypt_key, hex_str, maybe_decrypt_payload, reassemble_file_consuming,
-    reassemble_file_from_blocks, write_validated_file, ArchiveMetadata, Decompressor,
-    VerificationResult,
+    block_ref_counts, derive_decrypt_key, hex_str, maybe_decrypt_payload,
+    reassemble_file_consuming, reassemble_file_from_blocks, reassemble_file_shared,
+    write_validated_file, ArchiveMetadata, Decompressor, VerificationResult,
 };
 
 #[cfg(feature = "enterprise")]
@@ -368,10 +368,16 @@ impl Decompressor {
         let decompressed_blocks =
             self.decompress_blocks_sequential(archive, &metadata, &decrypt_key)?;
 
-        // Reassemble files, releasing each block as it is consumed.
+        // Reassemble files, releasing each block once its last reference is consumed.
         let mut decompressed_blocks = decompressed_blocks;
+        let mut ref_counts =
+            block_ref_counts(&metadata.file_entries, decompressed_blocks.len());
         for file_entry in &metadata.file_entries {
-            let file_data = reassemble_file_consuming(file_entry, &mut decompressed_blocks)?;
+            let file_data = reassemble_file_shared(
+                file_entry,
+                &mut decompressed_blocks,
+                &mut ref_counts,
+            )?;
 
             // Verify BLAKE3 hash
             let computed_hash = blake3::hash(&file_data);
@@ -437,7 +443,7 @@ impl Decompressor {
                 ))
             })?;
 
-        let baseline = self.decode_baseline()?;
+        let baseline = self.decode_baseline_for(&metadata.dictionary_hash)?;
 
         // Only allocate for the blocks this file actually needs, not all
         // blocks in the archive. This prevents a crafted archive with
@@ -520,7 +526,7 @@ impl Decompressor {
         // Blocks are independently decodable, so verification needs neither a
         // per-group predictor map nor the cap that used to bound its growth —
         // only the dictionary baseline, resolved once.
-        let baseline = self.decode_baseline()?;
+        let baseline = self.decode_baseline_for(&metadata.dictionary_hash)?;
 
         let mut decompressed_blocks: Vec<Option<Vec<u8>>> = vec![None; metadata.block_index.len()];
 
@@ -697,7 +703,7 @@ impl Decompressor {
         decrypt_key: &Option<super::decompress::DecryptKey>,
     ) -> Result<Vec<Option<Vec<u8>>>> {
         let mut decompressed_blocks: Vec<Option<Vec<u8>>> = vec![None; metadata.block_index.len()];
-        let baseline = self.decode_baseline()?;
+        let baseline = self.decode_baseline_for(&metadata.dictionary_hash)?;
         // S4 security fix: track cumulative decompressed size to prevent
         // decompression bomb attacks (many small blocks → enormous output).
         let mut total_decompressed: u64 = 0;
@@ -874,7 +880,7 @@ impl Decompressor {
         // leaves workers idle behind whichever lane drew the large blocks.
         // Per-block granularity is affordable precisely because a task
         // carries no state — just the shared baseline.
-        let baseline = self.decode_baseline()?;
+        let baseline = self.decode_baseline_for(&metadata.dictionary_hash)?;
         let baseline = baseline.as_deref();
 
         let decode_all = || -> Vec<Result<(usize, Vec<u8>)>> {

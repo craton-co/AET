@@ -27,6 +27,9 @@ struct CompressedFileBlocks {
     file_idx: usize,
     chunk_count: usize,
     blocks: Vec<router::CompressedChunk>,
+    /// If `Some(orig_file_idx)`, this file is byte-for-byte identical to an
+    /// earlier file in the same solid group and shares its block range.
+    dup_of_file_idx: Option<usize>,
 }
 
 /// Compression policy applied independently to each semantic solid group.
@@ -127,6 +130,11 @@ impl Compressor {
     {
         let sample = factory();
         let pid = sample.predictor_id();
+        let dictionary = if pid == PredictorId::NeuralSsm {
+            crate::builtin_dicts::for_content_type(ContentType::Text)
+        } else {
+            None
+        };
         Self {
             predictor_factory: Box::new(factory),
             predictor_id: pid,
@@ -134,7 +142,7 @@ impl Compressor {
             profile: CompressionProfile::Archival,
             #[cfg(feature = "enterprise")]
             encryption_config: None,
-            dictionary: None,
+            dictionary,
         }
     }
 
@@ -436,31 +444,49 @@ impl Compressor {
         // creates its own predictor + buffers compressed blocks in memory,
         // so bounding concurrency caps peak memory at roughly
         // max_threads × (predictor_size + group_data).
+        // Resolve the dictionary coding baseline once up front (mirroring
+        // Decompressor::decode_baseline). Every chunk is coded by a scratch
+        // predictor inside router::compress_chunk_with_baseline, so constructing
+        // a group predictor (which is ~100 MiB for ContextMixer) per chunk or
+        // per worker thread is unnecessary.
+        let encode_baseline: Option<Vec<u8>> = if let Some(ref dict) = self.dictionary {
+            let mut predictor = (self.predictor_factory)();
+            dict.apply(predictor.as_mut()).map_err(|e| {
+                AetherError::Compression(format!("Failed to apply dictionary to predictor: {e}"))
+            })?;
+            if predictor.set_coding_baseline(&dict.state) {
+                Some(dict.state.clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let baseline_ref = encode_baseline.as_deref();
+
         let compression_start = Instant::now();
         let compress_group =
             |group: &crate::grouper::SolidGroup| -> Result<Vec<CompressedFileBlocks>> {
-                // One predictor per group — created inside the closure so each
-                // rayon worker thread gets its own instance (no sharing).
-                #[cfg(not(feature = "threading"))]
-                let mut predictor = (self.predictor_factory)();
-                // Apply dictionary state if configured — propagate failure to
-                // prevent silently compressing with wrong predictor state.
-                #[cfg(not(feature = "threading"))]
-                if let Some(ref dict) = self.dictionary {
-                    dict.apply(predictor.as_mut()).map_err(|e| {
-                        AetherError::Compression(format!(
-                            "Failed to apply dictionary to predictor: {e}"
-                        ))
-                    })?;
-                    // Stage A: also install the dictionary as the per-block
-                    // coding baseline so it actually seeds the entropy coder
-                    // (no-op for predictors that don't support it). The router
-                    // propagates this onto its internal BWT/LZ77 predictors.
-                    predictor.set_coding_baseline(&dict.state);
-                }
                 let mut results = Vec::with_capacity(group.file_indices.len());
+                let mut seen_files: HashMap<([u8; 32], u64), usize> =
+                    HashMap::with_capacity(group.file_indices.len());
 
                 for &file_idx in &group.file_indices {
+                    let file_key = (
+                        file_entries[file_idx].blake3_hash,
+                        file_entries[file_idx].original_size,
+                    );
+                    if let Some(&orig_file_idx) = seen_files.get(&file_key) {
+                        results.push(CompressedFileBlocks {
+                            file_idx,
+                            chunk_count: 0,
+                            blocks: Vec::new(),
+                            dup_of_file_idx: Some(orig_file_idx),
+                        });
+                        continue;
+                    }
+                    seen_files.insert(file_key, file_idx);
+
                     let file_data = &file_datas[file_idx];
 
                     let chunks = if file_data.len() < chunker::MIN_CHUNK_SIZE as usize {
@@ -474,18 +500,9 @@ impl Compressor {
                     let blocks = chunks
                         .par_iter()
                         .map(|chunk| {
-                            let mut predictor = (self.predictor_factory)();
-                            if let Some(ref dict) = self.dictionary {
-                                dict.apply(predictor.as_mut()).map_err(|error| {
-                                    AetherError::Compression(format!(
-                                        "Failed to apply dictionary to predictor: {error}"
-                                    ))
-                                })?;
-                                predictor.set_coding_baseline(&dict.state);
-                            }
-                            router::compress_chunk(
+                            router::compress_chunk_with_baseline(
                                 chunk,
-                                predictor.as_mut(),
+                                baseline_ref,
                                 group.content_type,
                                 self.profile,
                             )
@@ -496,9 +513,9 @@ impl Compressor {
                     let blocks = {
                         let mut blocks = Vec::with_capacity(chunk_count);
                         for chunk in &chunks {
-                            blocks.push(router::compress_chunk(
+                            blocks.push(router::compress_chunk_with_baseline(
                                 chunk,
-                                predictor.as_mut(),
+                                baseline_ref,
                                 group.content_type,
                                 self.profile,
                             )?);
@@ -510,6 +527,7 @@ impl Compressor {
                         file_idx,
                         chunk_count,
                         blocks,
+                        dup_of_file_idx: None,
                     });
                 }
                 Ok(results)
@@ -563,6 +581,13 @@ impl Compressor {
             let mut group_block_count = 0u32;
 
             for fb in file_results {
+                if let Some(orig_idx) = fb.dup_of_file_idx {
+                    file_entries[fb.file_idx].chunk_start_idx =
+                        file_entries[orig_idx].chunk_start_idx;
+                    file_entries[fb.file_idx].chunk_count = file_entries[orig_idx].chunk_count;
+                    continue;
+                }
+
                 // Assign chunk range to this file (must be sequential)
                 file_entries[fb.file_idx].chunk_start_idx = global_chunk_idx;
                 file_entries[fb.file_idx].chunk_count =
