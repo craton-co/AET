@@ -1,5 +1,5 @@
 #!/bin/bash
-# AetherArch Local CI Test Runner using 'act'
+# AET (Adaptive Entropy Transformer) Local CI Test Runner using 'act'
 # Runs all GitHub Actions CI jobs locally
 
 set -e
@@ -21,7 +21,7 @@ NC='\033[0m' # No Color
 log_header() {
     echo ""
     echo -e "${BLUE}╔════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${BLUE}║           AetherArch Local CI Test Runner                   ║${NC}"
+    echo -e "${BLUE}║                 AET Local CI Test Runner                   ║${NC}"
     echo -e "${BLUE}╚════════════════════════════════════════════════════════════╝${NC}"
     echo ""
 }

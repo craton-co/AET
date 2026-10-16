@@ -1,5 +1,5 @@
 #!/bin/bash
-# AetherArch Local CI Test Runner
+# AET (Adaptive Entropy Transformer) Local CI Test Runner
 # Runs all GitHub Actions CI jobs in Docker containers
 
 set -e
@@ -14,7 +14,7 @@ CONTAINER_NAME="aether-ci-${BRANCH}-${COMMIT}"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 
 echo "╔════════════════════════════════════════════════════════════╗"
-echo "║           AetherArch Local CI Test Runner                   ║"
+echo "║                 AET Local CI Test Runner                   ║"
 echo "╚════════════════════════════════════════════════════════════╝"
 echo ""
 echo "Branch:          $BRANCH"

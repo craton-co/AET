@@ -10,7 +10,7 @@ $ErrorActionPreference = "Continue"
 
 $files = Get-ChildItem -Path $SilesiaDir -File
 Write-Host "=========================================================================================="
-Write-Host "Benchmark: AetherArch (Optimized vs Main) vs Competition (bzip2 -9, gzip -9)"
+Write-Host "Benchmark: AET (Optimized vs Main) vs Competition (bzip2 -9, gzip -9)"
 Write-Host "Corpus: Silesia ($($files.Count) files)"
 Write-Host "=========================================================================================="
 Write-Host ""

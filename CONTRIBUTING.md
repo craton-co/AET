@@ -1,11 +1,11 @@
-# Contributing to AetherArch
+# Contributing to AET (Adaptive Entropy Transformer)
 
-Thank you for your interest in contributing to AetherArch! This document provides
+Thank you for your interest in contributing to AET! This document provides
 guidelines and information for contributors.
 
 ## License
 
-AetherArch is licensed under Apache-2.0. By contributing, you agree that your
+AET is licensed under Apache-2.0. By contributing, you agree that your
 contributions will be licensed under the same terms. You retain copyright to
 your contributions. All contributors must sign the Contributor License Agreement (CLA).
 

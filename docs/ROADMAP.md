@@ -1,6 +1,6 @@
-# AetherArch Roadmap
+# AET (Adaptive Entropy Transformer) Roadmap
 
-Production readiness, licensing, and monetization plan for AetherArch 0.4.0+.
+Production readiness, licensing, and monetization plan for AET 0.4.0+.
 
 ## Phase 9: Ratio & Predictor Scalability (v0.4.0) — COMPLETE
 
@@ -338,7 +338,7 @@ Code security audit, documentation refresh, and GitHub infrastructure for public
 - [ ] Update PRESENTATION.md performance numbers to match v0.2.2
 
 ### GitHub Infrastructure
-- [x] Fix repository URL to `craton-co/aether-arch` across all Cargo.toml files
+- [x] Fix repository URL to `craton-co/AET` across all Cargo.toml files
 - [x] Add `docs.rs` metadata to all crate Cargo.toml files
 - [x] Add GitHub issue templates (bug report, feature request)
 - [x] Add pull request template

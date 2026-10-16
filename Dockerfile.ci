@@ -1,6 +1,6 @@
 FROM rust:1.94-slim
 
-LABEL description="AetherArch CI test environment"
+LABEL description="AET (Adaptive Entropy Transformer) CI test environment"
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \

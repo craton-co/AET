@@ -1,5 +1,5 @@
 @echo off
-REM AetherArch Local CI Test Runner for Windows
+REM AET (Adaptive Entropy Transformer) Local CI Test Runner for Windows
 REM Runs all GitHub Actions CI jobs in Docker containers
 
 setlocal enabledelayedexpansion
@@ -21,7 +21,7 @@ for /f "tokens=1-2 delims=/:" %%a in ('time /t') do (set mytime=%%a%%b)
 
 echo.
 echo ================================================================
-echo           AetherArch Local CI Test Runner
+echo               AET Local CI Test Runner
 echo ================================================================
 echo.
 echo Branch:          %BRANCH%

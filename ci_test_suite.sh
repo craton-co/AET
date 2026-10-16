@@ -1,5 +1,5 @@
 #!/bin/bash
-# Comprehensive CI Test Suite for AetherArch
+# Comprehensive CI Test Suite for AET (Adaptive Entropy Transformer)
 # Tests all GitHub Actions CI jobs locally
 
 set +e  # Don't exit on first error, we want to run all tests
@@ -24,7 +24,7 @@ tests_skipped=0
 log_header() {
     echo ""
     echo -e "${BLUE}╔════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${BLUE}║      AetherArch CI Test Suite - Complete Validation         ║${NC}"
+    echo -e "${BLUE}║          AET CI Test Suite - Complete Validation           ║${NC}"
     echo -e "${BLUE}╚════════════════════════════════════════════════════════════╝${NC}"
     echo ""
 }

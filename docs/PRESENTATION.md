@@ -1,11 +1,11 @@
-# AetherArch — Project Presentation
+# AET (Adaptive Entropy Transformer) — Project Presentation
 
-> Historical 0.2.3 presentation. For the current 0.3.0 architecture and
+> Historical 0.2.3 presentation. For the current 0.3.0+ architecture and
 > profiles, see `README.md`, `docs/ARCHITECTURE.md`, and `BENCHMARKS.md`.
 
 ---
 
-## Slide 1 · What Is AetherArch?
+## Slide 1 · What Is AET?
 
 > A next-generation file archiver built in Rust that replaces static entropy coding with an online neural-probabilistic model.
 

@@ -33,7 +33,7 @@ jobs:
       - uses: contributor-assistant/github-action@v2
         with:
           path-to-signatures: 'signatures/cla.json'
-          path-to-document: 'https://github.com/craton-co/aether-arch/blob/main/CLA.md'
+          path-to-document: 'https://github.com/craton-co/AET/blob/main/CLA.md'
           branch: 'main'
           allowlist: 'dependabot[bot],github-actions[bot]'
         env:

@@ -1,6 +1,6 @@
-# AetherArch - Claude Code Configuration
+# AET (Adaptive Entropy Transformer) - Claude Code Configuration
 
-**Project**: AetherArch (.aet) — next-generation file archiver in Rust  
+**Project**: AET: Adaptive Entropy Transformer (.aet) — next-generation file archiver in Rust  
 **Version**: 0.3.0
 **Status**: 330 tests (164 unit + 96 integration + 28 FFI + 41 server + 1 doc, 7 ignored)  
 **Workspace**: `aether-core`, `aether-cli` (`aet`), `aether-ffi`, `aether-server`, `aether-wasm`

@@ -1,10 +1,10 @@
-# AetherArch Local CI Testing Guide
+# AET (Adaptive Entropy Transformer) Local CI Testing Guide
 
 This guide explains how to run all GitHub Actions CI jobs locally before uploading/pushing code.
 
 ## Overview
 
-The AetherArch project uses GitHub Actions for continuous integration with the following jobs:
+The AET project uses GitHub Actions for continuous integration with the following jobs:
 
 | Job | Description | Status |
 |-----|-------------|--------|

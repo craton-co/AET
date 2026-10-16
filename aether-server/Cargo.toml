@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "AetherArch compression REST API server"
+description = "AET (Adaptive Entropy Transformer) compression REST API server"
 
 [dependencies]
 aether-core = { workspace = true }

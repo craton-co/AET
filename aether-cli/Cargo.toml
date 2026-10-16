@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "AetherArch CLI — next-generation file archiver"
+description = "AET (Adaptive Entropy Transformer) CLI — next-generation file archiver"
 
 [[bin]]
 name = "aet"

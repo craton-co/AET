@@ -1,6 +1,6 @@
 # Contributor License Agreement
 
-Thank you for your interest in contributing to AetherArch, owned and maintained
+Thank you for your interest in contributing to AET (Adaptive Entropy Transformer), owned and maintained
 by Craton Software Company ("Company"). This Contributor License Agreement ("Agreement")
 documents the rights granted by contributors to the Company.
 
@@ -12,8 +12,8 @@ a Contribution to the Project.
 **"Contribution"** means any original work of authorship, including modifications
 or additions to existing work, that is submitted to the Project for inclusion.
 
-**"Project"** means the AetherArch software and associated documentation
-maintained at https://github.com/craton-co/aether-arch.
+**"Project"** means the AET (Adaptive Entropy Transformer) software and associated documentation
+maintained at https://github.com/craton-co/AET.
 
 ## 2. Grant of Copyright License
 

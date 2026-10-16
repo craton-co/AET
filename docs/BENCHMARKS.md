@@ -1,4 +1,4 @@
-# AetherArch Benchmarks & Test Results
+# AET (Adaptive Entropy Transformer) Benchmarks & Test Results
 
 All results captured on Windows 11 Pro, Rust 1.x (release profile), March 2026.
 
