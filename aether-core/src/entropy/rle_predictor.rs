@@ -268,12 +268,12 @@ impl ProbabilityPredictor for RlePredictor {
         cdf[0] = 0;
         cdf[1] = (1 + (w0 * scalable / total).floor() as u32).min(PROB_TOTAL) as u16;
         let mut rle_cum = 0u32;
-        for m in 0..NUM_LITS {
+        for (m, &cnt) in lit_counts.iter().enumerate().take(NUM_LITS) {
             let cum = w01 + lit_coef * (rle_cum as f64) + (m as f64) * base_lit;
             let sym = 2 + m;
             cdf[sym] =
                 (sym as u32 + (cum * scalable / total).floor() as u32).min(PROB_TOTAL) as u16;
-            rle_cum += lit_counts[m];
+            rle_cum += cnt;
         }
         cdf[256] = PROB_TOTAL as u16;
         cdf
@@ -304,7 +304,10 @@ impl ProbabilityPredictor for RlePredictor {
             _ => {
                 let m = (byte - 2) as usize;
                 let rle_cum = fenwick254_prefix(lit_fenwick, m);
-                let lo = q(w01 + lit_coef * (rle_cum as f64) + (m as f64) * base_lit, 2 + m);
+                let lo = q(
+                    w01 + lit_coef * (rle_cum as f64) + (m as f64) * base_lit,
+                    2 + m,
+                );
                 let hi = if byte == 255 {
                     PROB_TOTAL as u16
                 } else {

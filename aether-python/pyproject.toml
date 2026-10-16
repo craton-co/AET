@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "aether"
-version = "0.1.0"
+version = "0.4.0"
 description = "Python bindings for AetherArch — next-gen neural-probabilistic file archiver"
 readme = "../README.md"
 license = {text = "Apache-2.0 OR Commercial"}

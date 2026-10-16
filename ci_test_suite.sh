@@ -90,14 +90,14 @@ log_section "5. DOCUMENTATION"
 RUSTDOCFLAGS="-Dwarnings" run_test "Doc build" "cargo doc --workspace --no-deps"
 echo ""
 
-log_section "6. MSRV CHECK (Rust 1.85.0)"
-# Check if 1.85.0 is installed
-if rustup toolchain list | grep -q "1.85.0"; then
-    run_test "MSRV (1.85.0)" "cargo +1.85.0 check --workspace"
+log_section "6. MSRV CHECK (Rust 1.88.0)"
+# Check if 1.88.0 is installed
+if rustup toolchain list | grep -q "1.88.0"; then
+    run_test "MSRV (1.88.0)" "cargo +1.88.0 check --workspace"
 else
-    echo "Installing Rust 1.85.0..."
-    rustup install 1.85.0 >/dev/null 2>&1
-    run_test "MSRV (1.85.0)" "cargo +1.85.0 check --workspace"
+    echo "Installing Rust 1.88.0..."
+    rustup install 1.88.0 >/dev/null 2>&1
+    run_test "MSRV (1.88.0)" "cargo +1.88.0 check --workspace"
 fi
 echo ""
 

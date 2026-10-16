@@ -13,7 +13,7 @@ The AetherArch project uses GitHub Actions for continuous integration with the f
 | **fmt** | Code format check with rustfmt | Linux |
 | **deny** | Dependency security check | Linux |
 | **doc** | Documentation build | Linux |
-| **msrv** | Minimum Supported Rust Version check | Linux (1.85.0) |
+| **msrv** | Minimum Supported Rust Version check | Linux (1.88.0) |
 | **cla** | Contributor License Agreement | GitHub only |
 | **release** | Build artifacts on tag | Conditional |
 
@@ -32,7 +32,7 @@ This will sequentially run:
 3. Build (release)
 4. Test suite (all tests)
 5. Documentation build
-6. MSRV check (Rust 1.85.0)
+6. MSRV check (Rust 1.88.0)
 7. Dependency security (cargo-deny)
 8. Feature flag combinations
 
@@ -59,8 +59,8 @@ cargo test --workspace --release
 # Documentation
 RUSTDOCFLAGS="-Dwarnings" cargo doc --workspace --no-deps
 
-# MSRV (Rust 1.85.0)
-cargo +1.85.0 check --workspace
+# MSRV (Rust 1.88.0)
+cargo +1.88.0 check --workspace
 
 # Dependency check
 cargo deny check
@@ -127,14 +127,14 @@ The `--no-deps` flag skips generating docs for dependencies (faster).
 
 ### 6. MSRV Check (Minimum Supported Rust Version)
 
-Ensures code compiles on Rust 1.85.0.
+Ensures code compiles on Rust 1.88.0.
 
 ```bash
 # Install if needed
-rustup install 1.85.0
+rustup install 1.88.0
 
 # Check
-cargo +1.85.0 check --workspace
+cargo +1.88.0 check --workspace
 ```
 
 **Note:** Check only (not full build) for speed.

@@ -526,7 +526,9 @@ pub(crate) fn block_ref_counts(file_entries: &[FileEntry], block_count: usize) -
     let mut counts = vec![0u32; block_count];
     for entry in file_entries {
         let start = entry.chunk_start_idx as usize;
-        let end = start.saturating_add(entry.chunk_count as usize).min(block_count);
+        let end = start
+            .saturating_add(entry.chunk_count as usize)
+            .min(block_count);
         for slot in counts.get_mut(start..end).into_iter().flatten() {
             *slot = slot.saturating_add(1);
         }
@@ -547,11 +549,14 @@ pub(crate) fn reassemble_file_shared(
     };
 
     let mut take_or_clone = |i: usize| -> Result<Vec<u8>> {
-        let rem = ref_counts.get_mut(i).map(|r| {
-            let cur = *r;
-            *r = cur.saturating_sub(1);
-            cur
-        }).unwrap_or(1);
+        let rem = ref_counts
+            .get_mut(i)
+            .map(|r| {
+                let cur = *r;
+                *r = cur.saturating_sub(1);
+                cur
+            })
+            .unwrap_or(1);
         if rem <= 1 {
             decompressed_blocks[i]
                 .take()

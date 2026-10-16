@@ -5,9 +5,23 @@ All notable changes to AetherArch will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.0] - 2026-10-16
 
-### Fixed
+### Added
+
+- **Fenwick-Accelerated Neural SSM Predictor**: Decomposed literal CDF queries and updates into an $O(1)$ binary run prefix (`RUNA`/`RUNB`) and a 254-entry Fenwick tree (Binary Indexed Tree) with 8-step binary lifting for literals `2..=255`, eliminating the per-byte $O(256)$ loop.
+- **SIMD Byteplane Split & Merge**: Vectorized byte de-interleaving and planar reconstruction, and parallelized multi-plane range coding via `par_iter()`.
+- **Overshoot-Free Fenwick `Order0Model`**: Replaced monotonic repair loops with a 256-entry Fenwick quantizer, accelerating byte-plane entropy coding.
+- **Unconditional Escaped Zero-Run RLE**: Fixed MTF RLE bailout on chunks containing byte 255 by introducing an escaped RLE encoding (`flags = 2`), ensuring binary streams never skip RLE compression.
+- **BLAKE3 Chunk & Identical-File Deduplication**: Content-defined chunks and identical files are deduplicated directly into the block index table, eliminating duplicate storage and re-compression.
+- **Pre-Resolved Dictionary Coding Baseline**: Baseline state is pre-resolved once per archive, eliminating redundant multi-megabyte `ContextMixer` allocations in parallel compression workers.
+- **Silesia Benchmark Suite**: Added `scripts/silesia-bench.ps1` and `scripts/competition-bench.ps1` for automated regression testing against `bzip2` and `gzip`.
+
+### Performance
+
+- **Compression Speed**: Reached **2.0–9.5 MiB/s** across the Silesia corpus (up to **9x faster** than 0.3.0 on complex binaries like `mozilla`).
+- **Decompression Speed**: Reached **2.2–10.6 MiB/s** (up to **18x faster** than 0.3.0 on `x-ray` and 4–8x on `mr`, `osdb`, and `samba`).
+- **Compression Ratio**: Achieved **26.54%** overall Silesia ratio, surpassing `bzip2 -9` (27.75%) on 10 out of 12 Silesia files and beating `gzip -9` (33.24%) by 20.2% smaller archives.
 
 - **Archives written by 0.3.0 could be unextractable.** `Order0Model`'s
   encode-side `query_cdf` fast path did not reproduce `predict_cdf`'s

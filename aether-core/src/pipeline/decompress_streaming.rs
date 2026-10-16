@@ -174,14 +174,10 @@ impl Decompressor {
         }
 
         // Reassemble and write files
-        let mut ref_counts =
-            block_ref_counts(&metadata.file_entries, decompressed_blocks.len());
+        let mut ref_counts = block_ref_counts(&metadata.file_entries, decompressed_blocks.len());
         for file_entry in &metadata.file_entries {
-            let file_data = reassemble_file_shared(
-                file_entry,
-                &mut decompressed_blocks,
-                &mut ref_counts,
-            )?;
+            let file_data =
+                reassemble_file_shared(file_entry, &mut decompressed_blocks, &mut ref_counts)?;
 
             // Verify file-level BLAKE3 hash
             let computed_hash = blake3::hash(&file_data);

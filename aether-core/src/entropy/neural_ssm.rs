@@ -526,7 +526,8 @@ impl NeuralSsmPredictor {
             0.0
         };
         let base_lit = rle_coef * (ALPHA_LIT as f64) + o2_coef * (O2_ALPHA as f64);
-        let total = w01 + rle_coef * (rle_lit_total as f64) + o2_coef * (o2_obs as f64) + 254.0 * base_lit;
+        let total =
+            w01 + rle_coef * (rle_lit_total as f64) + o2_coef * (o2_obs as f64) + 254.0 * base_lit;
 
         StepParams {
             w0,
@@ -778,7 +779,10 @@ impl ProbabilityPredictor for NeuralSsmPredictor {
                     *v >>= 1;
                     self.o2_lit_totals[o2_ctx] += *v;
                 }
-                fenwick254_rebuild(&mut self.o2_lit_fenwick[o2_ctx], &self.o2_lit_counts[o2_ctx]);
+                fenwick254_rebuild(
+                    &mut self.o2_lit_fenwick[o2_ctx],
+                    &self.o2_lit_counts[o2_ctx],
+                );
             } else {
                 fenwick254_add(&mut self.o2_lit_fenwick[o2_ctx], idx, 1);
             }
@@ -787,8 +791,8 @@ impl ProbabilityPredictor for NeuralSsmPredictor {
         // ── SSM state update: EMA with per-dimension decay ────────────
         let emb = &self.embed[y];
         if d == D_MAX {
-            for i in 0..D_MAX {
-                self.h[i] = self.a[i] * self.h[i] + self.a_inv[i] * emb[i];
+            for (i, &emb_val) in emb.iter().enumerate().take(D_MAX) {
+                self.h[i] = self.a[i] * self.h[i] + self.a_inv[i] * emb_val;
             }
         } else {
             for (i, h_val) in self.h.iter_mut().enumerate().take(d) {

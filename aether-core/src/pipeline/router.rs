@@ -84,12 +84,7 @@ pub fn compress_chunk(
     content_type: crate::format::ContentType,
     profile: CompressionProfile,
 ) -> Result<CompressedChunk> {
-    compress_chunk_with_baseline(
-        chunk,
-        predictor.coding_baseline(),
-        content_type,
-        profile,
-    )
+    compress_chunk_with_baseline(chunk, predictor.coding_baseline(), content_type, profile)
 }
 
 /// Compress a chunk given the optional dictionary coding baseline directly.
@@ -194,8 +189,8 @@ pub fn compress_chunk_with_baseline(
             // High-entropy NumericData chunks (> 7.5 bps) only enter PredictorRans
             // so byte-plane splitting can be attempted; if byte-plane did not win,
             // skip BWT/LZ77/plain-NeuralSSM and fall straight to Zstd/Store.
-            let skip_neural_trials =
-                numeric_byteplane_won || (is_numeric && chunk.entropy > analyzer::HIGH_ENTROPY_THRESHOLD);
+            let skip_neural_trials = numeric_byteplane_won
+                || (is_numeric && chunk.entropy > analyzer::HIGH_ENTROPY_THRESHOLD);
 
             if !skip_neural_trials {
                 // Single scratch predictor reused across all trial paths.
