@@ -12,7 +12,7 @@ edition = "2021"
 # rustc 1.88). Verified with `cargo +1.88.0 check --workspace`.
 rust-version = "1.88.0"
 license = "Apache-2.0"
-repository = "https://github.com/craton-co/aether-arch"
+repository = "https://github.com/craton-co/AET"
 
 [workspace.dependencies]
 aether-core = { path = "aether-core" }

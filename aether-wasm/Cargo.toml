@@ -1,8 +1,8 @@
 [package]
 name = "aether-wasm"
-version = "0.3.0"
+version = "0.4.0"
 edition.workspace = true
-description = "WebAssembly bindings for AetherArch decompression"
+description = "WebAssembly bindings for AET (Adaptive Entropy Transformer) decompression"
 license.workspace = true
 
 [lib]

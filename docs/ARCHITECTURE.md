@@ -1,6 +1,6 @@
-# AetherArch Architecture
+# AET (Adaptive Entropy Transformer) Architecture
 
-This document describes the internal design of AetherArch in detail: the archive format, compression pipeline, predictor models, preprocessing transforms, and how they all fit together.
+This document describes the internal design of AET (Adaptive Entropy Transformer) in detail: the archive format, compression pipeline, predictor models, preprocessing transforms, and how they all fit together.
 
 ## Table of Contents
 
@@ -17,7 +17,7 @@ This document describes the internal design of AetherArch in detail: the archive
 
 ## Design Philosophy
 
-Traditional archivers (gzip, zip) use a fixed LZ77+Huffman pipeline. AetherArch instead separates **modeling** (predicting what byte comes next) from **coding** (encoding the actual byte given the prediction). This separation allows plugging in increasingly sophisticated models without changing the coding layer.
+Traditional archivers (gzip, zip) use a fixed LZ77+Huffman pipeline. AET instead separates **modeling** (predicting what byte comes next) from **coding** (encoding the actual byte given the prediction). This separation allows plugging in increasingly sophisticated models without changing the coding layer.
 
 Key design decisions:
 

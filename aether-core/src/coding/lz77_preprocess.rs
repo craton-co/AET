@@ -22,7 +22,7 @@ const MIN_MATCH: usize = 3;
 const MAX_MATCH: usize = 65538; // large enough for any data
 const HASH_BITS: usize = 16; // 64K hash entries
 const HASH_SIZE: usize = 1 << HASH_BITS;
-const MAX_CHAIN: usize = 4096; // max hash chain walk length (matches gzip -9)
+const MAX_CHAIN: usize = 256; // bounded hash chain walk length for fast throughput
 const NICE_MATCH: usize = 258; // stop searching if match >= this
 /// Maximum input size for LZ77 encoding (64 MiB).
 ///
@@ -90,11 +90,13 @@ impl MatchFinder {
             let offset = (pos - ref_pos) as u16;
 
             // Quick check: compare last best byte + first bytes for early rejection
-            if data[ref_pos + best_len] == data[pos + best_len] {
-                let mut len = 0;
-                while len < max_len && data[ref_pos + len] == data[pos + len] {
-                    len += 1;
-                }
+            if data[ref_pos + best_len] == data[pos + best_len]
+                && data[ref_pos] == data[pos]
+                && data[ref_pos + 1] == data[pos + 1]
+            {
+                let a = &data[ref_pos + 2..ref_pos + max_len];
+                let b = &data[pos + 2..pos + max_len];
+                let len = 2 + a.iter().zip(b.iter()).take_while(|(x, y)| x == y).count();
 
                 if len > best_len {
                     best_len = len;

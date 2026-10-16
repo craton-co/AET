@@ -1,5 +1,5 @@
 #!/usr/bin/env pwsh
-# AetherArch Local CI Test Runner using Docker
+# AET (Adaptive Entropy Transformer) Local CI Test Runner using Docker
 # Runs all GitHub Actions CI jobs in Docker containers (Cross-platform)
 #
 # NOTE: This script is intentionally ASCII-only. Windows PowerShell 5.1 reads
@@ -33,7 +33,7 @@ function Write-ColorOutput($ForegroundColor) {
 
 function Write-Header {
     Write-ColorOutput Cyan "================================================================"
-    Write-ColorOutput Cyan "           AetherArch Local CI Test Runner"
+    Write-ColorOutput Cyan "              AET Local CI Test Runner"
     Write-ColorOutput Cyan "================================================================"
     Write-Output ""
 }

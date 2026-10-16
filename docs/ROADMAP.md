@@ -1,6 +1,16 @@
-# AetherArch Roadmap
+# AET (Adaptive Entropy Transformer) Roadmap
 
-Production readiness, licensing, and monetization plan for AetherArch 0.3.0+.
+Production readiness, licensing, and monetization plan for AET 0.4.0+.
+
+## Phase 9: Ratio & Predictor Scalability (v0.4.0) — COMPLETE
+
+- [x] **Fenwick-accelerated Neural SSM predictor**: Decomposed literal CDF queries into $O(1)$ run prefix and 254-entry Fenwick tree with 8-step binary lifting ($O(\log 256)$), breaking the ~0.4 MiB/s speed ceiling and lifting compression throughput to 2.0–9.5 MiB/s and decompression to 2.2–10.6 MiB/s.
+- [x] **Vectorized SSM states & reciprocal normalizer**: Aligned `D=32` state arrays to 32 bytes for AVX2/NEON auto-vectorization and eliminated per-byte hardware `f64` divisions.
+- [x] **SIMD byteplane split/merge**: Pre-allocated slice de-interleaving and multi-plane range coding parallelization.
+- [x] **Overshoot-free Fenwick Order0 quantizer**: Monotone binary indexed tree quantizer for numeric byteplanes.
+- [x] **Unconditional zero-run RLE with escaped byte 255**: Ensures BWT zero-run RLE never falls back to raw MTF on binary chunks.
+- [x] **Exact chunk deduplication**: BLAKE3 chunk hashing deduplicates repeated blocks across files directly into the block index.
+- [x] **Pre-resolved dictionary baseline**: Prevents redundant multi-megabyte `ContextMixer` allocations in parallel Rayon threads.
 
 ## Phase 8: Decompression speed (post-0.3.0) — COMPLETE
 
@@ -328,7 +338,7 @@ Code security audit, documentation refresh, and GitHub infrastructure for public
 - [ ] Update PRESENTATION.md performance numbers to match v0.2.2
 
 ### GitHub Infrastructure
-- [x] Fix repository URL to `craton-co/aether-arch` across all Cargo.toml files
+- [x] Fix repository URL to `craton-co/AET` across all Cargo.toml files
 - [x] Add `docs.rs` metadata to all crate Cargo.toml files
 - [x] Add GitHub issue templates (bug report, feature request)
 - [x] Add pull request template

@@ -1,11 +1,11 @@
 [package]
 name = "aether-cli"
-version = "0.3.0"
+version = "0.4.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "AetherArch CLI — next-generation file archiver"
+description = "AET (Adaptive Entropy Transformer) CLI — next-generation file archiver"
 
 [[bin]]
 name = "aet"

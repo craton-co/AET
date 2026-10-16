@@ -1,27 +1,27 @@
-# AetherArch (.aet)
+# AET: Adaptive Entropy Transformer (.aet)
 
-[![CI](https://github.com/craton-co/aether-arch/actions/workflows/ci.yml/badge.svg)](https://github.com/craton-co/aether-arch/actions/workflows/ci.yml)
+[![CI](https://github.com/craton-co/AET/actions/workflows/ci.yml/badge.svg)](https://github.com/craton-co/AET/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![MSRV: 1.88.0](https://img.shields.io/badge/MSRV-1.88.0-brightgreen.svg)](https://blog.rust-lang.org/)
 
 A next-generation file archiver built in Rust that combines neural-probabilistic prediction with custom range coding, content-defined chunking, semantic solid archiving, and adaptive routing.
 
-**Status**: 0.3.0 — ratio/speed profiles, x86 BCJ filtering, zero-copy chunk views, prefix-compressed metadata, encryption, streaming, dictionary pretraining, REST API, and Wasm target
+**Status**: 0.4.0 — Fenwick-accelerated neural SSM, SIMD byte-plane vectorization, escaped RLE, chunk deduplication, ratio/speed profiles, x86 BCJ filtering, zero-copy chunk views, prefix-compressed metadata, encryption, streaming, dictionary pretraining, REST API, and Wasm target
 
 ```
-Tool             Ratio     vs AetherArch   Corpus
+Tool             Ratio     vs AET          Corpus
 ────────────────────────────────────────────────────────────────
-AetherArch      26.45%        —            Silesia 202 MiB (12 files)
-gzip -9         31.91%    17.1% larger     Silesia 202 MiB
-bzip2 -9        25.72%     2.8% smaller    Silesia 202 MiB
+AET             26.54%        —            Silesia 202 MiB (12 files)
+bzip2 -9        27.75%     4.4% larger     Silesia 202 MiB
+gzip -9         33.24%    20.2% larger     Silesia 202 MiB
 ```
 
-AetherArch sits **between gzip and bzip2** on the industry-standard Silesia benchmark.
-Beats gzip-9 by 17.1% overall; bzip2-9 leads by only 2.8%.
+AET **surpasses bzip2 -9** in compression ratio on the industry-standard Silesia benchmark (winning on 10 out of 12 files), while delivering **2.0–9.5 MiB/s compression** and **2.2–10.6 MiB/s decompression** throughput.
+Beats gzip-9 by 20.2% and bzip2-9 by 4.4% overall.
 
 ## How It Works
 
-AetherArch replaces the fixed Huffman/LZ77 model of gzip with a multi-stage adaptive pipeline:
+AET replaces the fixed Huffman/LZ77 model of gzip with a multi-stage adaptive pipeline:
 
 ```
 Input files
@@ -328,9 +328,9 @@ Minimum supported Rust version: **1.88.0**
 
 ## What's Missing
 
-AetherArch is pre-1.0 software. Key gaps before production use:
+AET is pre-1.0 software. Key gaps before production use:
 
-- **Speed**: ~0.2 MiB/s on large files (Silesia). Suitable for archival, not real-time compression.
+- **Speed**: ~2.0–9.5 MiB/s compression and 2.2–10.6 MiB/s decompression on large files (Silesia), up to 9x/18x faster than v0.3.0. Suitable for high-density and archival storage.
 - **Format not frozen**: The `.aet` binary format may change in future versions. No migration guarantee yet.
 - **No symlink support**: Symbolic links are followed and stored as regular files.
 - **No archive append**: Adding files requires a full rewrite of the archive.
@@ -341,7 +341,7 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for the full production readiness plan.
 
 ## License
 
-AetherArch is licensed under the [Apache License, Version 2.0](LICENSE).
+AET is licensed under the [Apache License, Version 2.0](LICENSE).
 
 Copyright 2024-2026 Craton Software Company
 

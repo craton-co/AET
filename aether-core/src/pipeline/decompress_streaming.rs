@@ -13,7 +13,7 @@ use crate::header::{ArchiveHeader, FileEntry, SolidGroupEntry};
 use crate::pipeline::router;
 
 use super::decompress::{
-    derive_decrypt_key, hex_str, maybe_decrypt_payload, reassemble_file_consuming,
+    block_ref_counts, derive_decrypt_key, hex_str, maybe_decrypt_payload, reassemble_file_shared,
     write_validated_file, Decompressor, StreamingMetadata, VerificationResult,
 };
 
@@ -141,7 +141,7 @@ impl Decompressor {
         // Blocks are independently decodable, so no per-group predictor state
         // carries across them — only the dictionary coding baseline, which is
         // constant. See the router's "Group predictor state" note.
-        let baseline = self.decode_baseline()?;
+        let baseline = self.decode_baseline_for(&metadata.dictionary_hash)?;
 
         // Decompressed blocks, indexed by sequential block position (0..N)
         let mut decompressed_blocks: Vec<Option<Vec<u8>>> = vec![None; block_count];
@@ -174,8 +174,10 @@ impl Decompressor {
         }
 
         // Reassemble and write files
+        let mut ref_counts = block_ref_counts(&metadata.file_entries, decompressed_blocks.len());
         for file_entry in &metadata.file_entries {
-            let file_data = reassemble_file_consuming(file_entry, &mut decompressed_blocks)?;
+            let file_data =
+                reassemble_file_shared(file_entry, &mut decompressed_blocks, &mut ref_counts)?;
 
             // Verify file-level BLAKE3 hash
             let computed_hash = blake3::hash(&file_data);
@@ -244,7 +246,7 @@ impl Decompressor {
             corrupted_blocks: Vec::new(),
         };
 
-        let baseline = self.decode_baseline()?;
+        let baseline = self.decode_baseline_for(&metadata.dictionary_hash)?;
 
         for block_idx in 0..block_count {
             // Read block header

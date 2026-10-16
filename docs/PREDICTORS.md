@@ -1,8 +1,8 @@
-# AetherArch Predictors and Compression Methods
+# AET (Adaptive Entropy Transformer) Predictors and Compression Methods
 
 ## Overview
 
-AetherArch uses a three-level compression strategy:
+AET uses a three-level compression strategy:
 
 1. **Preprocessing** - BWT+MTF+RLE (primary path for text), LZ77, or LZ4 removes redundancy from raw data.
 2. **Predictor** - A probabilistic model that predicts the next byte of the preprocessed stream. The predictor produces a probability distribution over all 256 byte values.

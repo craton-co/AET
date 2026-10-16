@@ -1,5 +1,5 @@
 #!/bin/bash
-# AetherArch Local CI Test Runner
+# AET (Adaptive Entropy Transformer) Local CI Test Runner
 # Runs all GitHub Actions CI jobs in Docker containers
 
 set -e
@@ -14,7 +14,7 @@ CONTAINER_NAME="aether-ci-${BRANCH}-${COMMIT}"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 
 echo "╔════════════════════════════════════════════════════════════╗"
-echo "║           AetherArch Local CI Test Runner                   ║"
+echo "║                 AET Local CI Test Runner                   ║"
 echo "╚════════════════════════════════════════════════════════════╝"
 echo ""
 echo "Branch:          $BRANCH"
@@ -160,7 +160,7 @@ docker run --rm \
 echo ""
 
 # MSRV check
-log_section "6. MSRV Check (Rust 1.85.0)"
+log_section "6. MSRV Check (Rust 1.88.0)"
 docker run --rm \
     --name "$CONTAINER_NAME-msrv" \
     --cpus 4 \
@@ -168,7 +168,7 @@ docker run --rm \
     -v "$PROJECT_ROOT:/workspace" \
     -w /workspace \
     "$IMAGE_NAME" \
-    bash -c "rustup install 1.85.0 && cargo +1.85.0 check --workspace" && \
+    bash -c "rustup install 1.88.0 && cargo +1.88.0 check --workspace" && \
     log_success "MSRV check passed" || {
     log_error "MSRV check failed"
     exit 1

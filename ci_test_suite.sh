@@ -1,5 +1,5 @@
 #!/bin/bash
-# Comprehensive CI Test Suite for AetherArch
+# Comprehensive CI Test Suite for AET (Adaptive Entropy Transformer)
 # Tests all GitHub Actions CI jobs locally
 
 set +e  # Don't exit on first error, we want to run all tests
@@ -24,7 +24,7 @@ tests_skipped=0
 log_header() {
     echo ""
     echo -e "${BLUE}╔════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${BLUE}║      AetherArch CI Test Suite - Complete Validation         ║${NC}"
+    echo -e "${BLUE}║          AET CI Test Suite - Complete Validation           ║${NC}"
     echo -e "${BLUE}╚════════════════════════════════════════════════════════════╝${NC}"
     echo ""
 }
@@ -90,14 +90,14 @@ log_section "5. DOCUMENTATION"
 RUSTDOCFLAGS="-Dwarnings" run_test "Doc build" "cargo doc --workspace --no-deps"
 echo ""
 
-log_section "6. MSRV CHECK (Rust 1.85.0)"
-# Check if 1.85.0 is installed
-if rustup toolchain list | grep -q "1.85.0"; then
-    run_test "MSRV (1.85.0)" "cargo +1.85.0 check --workspace"
+log_section "6. MSRV CHECK (Rust 1.88.0)"
+# Check if 1.88.0 is installed
+if rustup toolchain list | grep -q "1.88.0"; then
+    run_test "MSRV (1.88.0)" "cargo +1.88.0 check --workspace"
 else
-    echo "Installing Rust 1.85.0..."
-    rustup install 1.85.0 >/dev/null 2>&1
-    run_test "MSRV (1.85.0)" "cargo +1.85.0 check --workspace"
+    echo "Installing Rust 1.88.0..."
+    rustup install 1.88.0 >/dev/null 2>&1
+    run_test "MSRV (1.88.0)" "cargo +1.88.0 check --workspace"
 fi
 echo ""
 

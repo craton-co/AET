@@ -1,4 +1,4 @@
-# AetherArch Benchmarks & Test Results
+# AET (Adaptive Entropy Transformer) Benchmarks & Test Results
 
 All results captured on Windows 11 Pro, Rust 1.x (release profile), March 2026.
 
@@ -62,10 +62,31 @@ The [Silesia corpus](https://sun.aei.polsl.pl/~sdeor/index.php?page=silesia) is 
 
 ### Silesia Corpus — Primary Results (202.1 MiB)
 
-`aet bench` output (all 12 files, single archive):
+`0.4.0` (2026-10-16, Fenwick Neural SSM + SIMD byteplane + escaped RLE):
 
 ```
-0.2.4 (2026-03-24, libsais SA-IS + entropy BWT skip >7.0 bps):
+File         Size | aet-0.4.0 Ratio  Comp / Decomp | bzip2 -9 Ratio   Comp | gzip -9 Ratio    Comp
+--------------------------------------------------------------------------------------------------
+dickens      9.7M |       28.50%     3.1 / 2.6 M/s |       28.63%  4.4 M/s |       39.73% 24.3 M/s
+mozilla     48.8M |       35.87%     5.3 / 5.7 M/s |       33.25%  3.1 M/s |       40.23% 15.9 M/s
+mr           9.5M |       26.21%     4.3 / 6.4 M/s |       38.48%  2.4 M/s |       39.69% 13.9 M/s
+nci         32.0M |        5.54%    9.5 / 10.6 M/s |        8.65%  5.8 M/s |       10.59% 22.4 M/s
+ooffice      5.9M |       47.24%     2.0 / 2.7 M/s |       48.24%  2.9 M/s |       54.43% 13.9 M/s
+osdb         9.6M |       29.74%     2.6 / 4.5 M/s |       33.45%  2.9 M/s |       38.65% 16.9 M/s
+reymont      6.3M |       19.63%     2.1 / 2.4 M/s |       18.77%  4.2 M/s |       27.75% 22.3 M/s
+samba       20.6M |       21.80%     5.2 / 5.7 M/s |       22.40%  3.4 M/s |       29.41% 18.7 M/s
+sao          6.9M |       76.24%     2.3 / 2.2 M/s |       77.89%  2.2 M/s |       80.60% 11.4 M/s
+webster     39.5M |       21.35%     4.6 / 3.1 M/s |       21.61%  4.7 M/s |       29.62% 21.9 M/s
+x-ray        8.1M |       49.43%     2.3 / 7.3 M/s |       60.77%  2.4 M/s |       66.97% 14.0 M/s
+xml          5.1M |        8.75%     2.5 / 3.3 M/s |       11.83%  6.0 M/s |       14.67% 27.2 M/s
+--------------------------------------------------------------------------------------------------
+TOTAL      202.1M |       26.54%     4.5 / 5.1 M/s |       27.75%  3.8 M/s |       33.24% 18.8 M/s
+```
+
+**vs gzip-9** (33.24%): AetherArch is **20.2% smaller overall**.
+**vs bzip2-9** (27.75%): AetherArch is **4.4% smaller overall** (winning on 10 out of 12 files).
+
+0.2.4 (historical baseline):
 Predictor         Comp MB/s  Decomp MB/s      Ratio  Bits/byte       Time
 ---------------------------------------------------------------------------
 ssm                    0.4         0.3     26.55%      2.124   565.51s

@@ -1,8 +1,8 @@
-# AetherArch Documentation
+# AET (Adaptive Entropy Transformer) Documentation
 
 ## Overview
 
-This directory contains AetherArch project documentation, organized by version and purpose.
+This directory contains AET project documentation, organized by version and purpose.
 
 ### Directory Structure
 

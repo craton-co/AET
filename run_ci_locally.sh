@@ -1,5 +1,5 @@
 #!/bin/bash
-# AetherArch Local CI Test Runner using 'act'
+# AET (Adaptive Entropy Transformer) Local CI Test Runner using 'act'
 # Runs all GitHub Actions CI jobs locally
 
 set -e
@@ -21,7 +21,7 @@ NC='\033[0m' # No Color
 log_header() {
     echo ""
     echo -e "${BLUE}╔════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${BLUE}║           AetherArch Local CI Test Runner                   ║${NC}"
+    echo -e "${BLUE}║                 AET Local CI Test Runner                   ║${NC}"
     echo -e "${BLUE}╚════════════════════════════════════════════════════════════╝${NC}"
     echo ""
 }
@@ -158,12 +158,12 @@ RUSTDOCFLAGS="-Dwarnings" cargo doc --workspace --no-deps || {
 log_success "Documentation build passed"
 echo ""
 
-log_section "Test 6: MSRV Check (Rust 1.85.0)"
-log_info "Running: cargo +1.85.0 check --workspace"
-if rustup install 1.85.0 2>/dev/null; then
-    log_info "Installed Rust 1.85.0"
+log_section "Test 6: MSRV Check (Rust 1.88.0)"
+log_info "Running: cargo +1.88.0 check --workspace"
+if rustup install 1.88.0 2>/dev/null; then
+    log_info "Installed Rust 1.88.0"
 fi
-if cargo +1.85.0 check --workspace; then
+if cargo +1.88.0 check --workspace; then
     log_success "MSRV check passed"
 else
     log_error "MSRV check failed"

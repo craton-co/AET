@@ -340,11 +340,11 @@ impl<'a> RangeDecoder<'a> {
         symbol as u8
     }
 
-    /// Split half of [`decode_cdf`]: the scale factor and the cumulative
+    /// Split half of [`Self::decode_cdf`]: the scale factor and the cumulative
     /// frequency the next symbol's interval must contain.
     ///
     /// Splitting the decode step lets the *predictor* resolve the symbol
-    /// (see [`ProbabilityPredictor::decode_symbol`]), which for models whose
+    /// (see [`crate::entropy::ProbabilityPredictor::decode_symbol`]), which for models whose
     /// CDF is expensive to materialise is far cheaper than building all 257
     /// entries and then binary-searching them.
     #[inline(always)]
@@ -358,7 +358,7 @@ impl<'a> RangeDecoder<'a> {
         (r, (self.code / r).min(PROB_TOTAL - 1))
     }
 
-    /// Other half of [`decode_cdf`]: consume the resolved symbol's interval.
+    /// Other half of [`Self::decode_cdf`]: consume the resolved symbol's interval.
     ///
     /// `r` must be the value returned by the matching [`decode_freq`] call,
     /// and `[cdf_lo, cdf_hi)` the interval containing that call's `freq`.
